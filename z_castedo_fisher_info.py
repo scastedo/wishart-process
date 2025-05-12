@@ -1,7 +1,8 @@
 import sys
 
 import jax
-jax.config.update('jax_platform_name', 'cpu')
+# jax.config.update('jax_platform_name', 'cpu')
+jax.config.update("jax_default_matmul_precision", "highest")
 
 from numpyro import optim
 sys.path.append('wishart-process')
@@ -87,8 +88,7 @@ TEST_DATA = resort_preprocessing(HUNGRY_DECONV,HUNGRY_ANGLE,HUNGRY_SF,0)[:,:,1,:
 # Animal = 0, SF = 0 and during response
 TEST_RESPONSE = jnp.nanmean(TEST_DATA,axis = -1) # Shape N x C x K 
 TEST_RESPONSE = jnp.transpose(TEST_RESPONSE, (2,1,0)) # Shape K X C X N
-print(TEST_RESPONSE.shape)
-
+print('Data Shape: ',TEST_RESPONSE.shape)
 N = TEST_RESPONSE.shape[2]
 C = TEST_RESPONSE.shape[1]
 K = TEST_RESPONSE.shape[0]
@@ -128,13 +128,15 @@ with numpyro.handlers.seed(rng_seed=SEED):
     adam = optim.Adam(1e-1)
     key = jax.random.PRNGKey(inference_seed)
 
-    varfam.infer(adam,X_CONDITIONS,TEST_RESPONSE,n_iter = 1000,key=key)
+    varfam.infer(adam,X_CONDITIONS,TEST_RESPONSE,n_iter = 10000,key=key)
     joint.update_params(varfam.posterior)
-    posterior = models.NormalGaussianWishartPosterior(joint,varfam,X_CONDITIONS)
+    X_NEW_CONDITIONS = jnp.linspace(0,C-1,20)
+    posterior = models.NormalGaussianWishartPosterior(joint,varfam,X_NEW_CONDITIONS)
 
-    mu_hat, sigma_hat, F_hat = posterior.sample(X_CONDITIONS)
-    mu_prime, sigma_prime = posterior.derivative(X_CONDITIONS)
+    mu_hat, sigma_hat, F_hat = posterior.sample(X_NEW_CONDITIONS)
+
+    mu_prime, sigma_prime = posterior.derivative(X_NEW_CONDITIONS)
     # Compute Fisher Information
-    fi = evaluation.fisher_information(X_CONDITIONS,mu_prime,sigma_hat,sigma_prime)
+    fi = evaluation.fisher_information(X_NEW_CONDITIONS,mu_prime,sigma_hat,sigma_prime)
     print(fi.shape)
     print(fi)
