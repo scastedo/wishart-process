@@ -21,21 +21,9 @@ import itertools
 from tqdm import tqdm
 import numpy as np
 from scipy.io import loadmat
-
-
-
 import matplotlib.pyplot as plt
-HUNGRY_DECONV = np.load('../Data/predictions_fullTrace_hungry.npy', allow_pickle=True)
-FOOD_RESTRICTED_HUNGRY = [1,2,3,6,7,9,11,12]
-CONTROL_HUNGRY = [0,4,5,8,10,13]
 
-AngStim_data = '../Data/metadata_deconv/stimAngle_hungry.mat'
-ANG_STIM_DATA = loadmat(AngStim_data, simplify_cells= True)
-HUNGRY_ANGLE = ANG_STIM_DATA['order_of_stim_arossAnimals']
 
-SfStim_data = '../Data/metadata_deconv/stimSpatFreq_hungry.mat'
-SF_STIM_DATA = loadmat(SfStim_data, simplify_cells= True)
-HUNGRY_SF = SF_STIM_DATA['stimSpatFreq_arossAnimals']
 
 def resort_preprocessing(datum,angle_arr,sf_arr,animal):
     data = np.copy(datum[animal,:])
@@ -82,6 +70,20 @@ def resort_preprocessing(datum,angle_arr,sf_arr,animal):
     reshaped_data = np.stack(reshaped_data,axis=2)    
 
     return reshaped_data
+
+
+
+HUNGRY_DECONV = np.load('../Data/predictions_fullTrace_hungry.npy', allow_pickle=True)
+FOOD_RESTRICTED_HUNGRY = [1,2,3,6,7,9,11,12]
+CONTROL_HUNGRY = [0,4,5,8,10,13]
+
+AngStim_data = '../Data/metadata_deconv/stimAngle_hungry.mat'
+ANG_STIM_DATA = loadmat(AngStim_data, simplify_cells= True)
+HUNGRY_ANGLE = ANG_STIM_DATA['order_of_stim_arossAnimals']
+
+SfStim_data = '../Data/metadata_deconv/stimSpatFreq_hungry.mat'
+SF_STIM_DATA = loadmat(SfStim_data, simplify_cells= True)
+HUNGRY_SF = SF_STIM_DATA['stimSpatFreq_arossAnimals']
 
 
 TEST_DATA = resort_preprocessing(HUNGRY_DECONV,HUNGRY_ANGLE,HUNGRY_SF,0)[:,:,1,:,40:80]
