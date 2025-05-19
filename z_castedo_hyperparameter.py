@@ -102,7 +102,7 @@ def evaluate_hyperparameters(hyperparams, x_train, y_train, x_test, y_test, n_it
     posterior = models.NormalGaussianWishartPosterior(joint,varfam,x_train)
     with numpyro.handlers.seed(rng_seed=inference_seed):
         mu_hat, sigma_hat, F_hat = posterior.sample(x_train)
-    mu_empirical = y_train.mean(0)
+    mu_empirical = jnp.nanmean(y_train,axis=0)
     log_likelihood = likelihood.log_prob(y_test['x'], mu_empirical, sigma_hat).flatten()
 
     return log_likelihood.mean()
@@ -158,7 +158,7 @@ if __name__ == "__main__":
     HUNGRY_SF = SF_STIM_DATA['stimSpatFreq_arossAnimals']
     ######################################################
     hyperparam_grid = {
-        'lambda_gp_angle': [1.0,5,10,15,20],
+        'lambda_gp_angle': [0.5,1,5,10,50],
         'gamma_gp_angle': [1e-5],
         'beta_gp_angle': [10.0],
         
@@ -166,7 +166,7 @@ if __name__ == "__main__":
         # 'gamma_gp_sf': [1e-5],
         # 'beta_gp_sf': [10.0],
         
-        'lambda_wp_angle': [0.5,1.0,5,10],
+        'lambda_wp_angle': [0.5],
         'gamma_wp_angle': [1e-6],
         'beta_wp_angle': [1.0],
         
@@ -174,7 +174,7 @@ if __name__ == "__main__":
         # 'gamma_wp_sf': [1e-6],
         # 'beta_wp_sf': [1.0],
         
-        'p': [0]
+        'p': [0,1,2]
     }
     SEED = 1
     td = False
