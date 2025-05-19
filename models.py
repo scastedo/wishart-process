@@ -161,6 +161,9 @@ class WishartLRDProcess:
         
         f = jnp.einsum('ij,mnj->mni',(K_X_x.T@Ki),Y)
         K = K_x_x - K_X_x.T@Ki@K_X_x
+        # regularize covariance ADDED BY SEB
+        jitter = 1e-6  # ADDED BY SEB
+        K = K + jitter * jnp.eye(K.shape[0], dtype=K.dtype) # ADDED BY SEB
         
         F = numpyro.sample(
             'F_test',dist.MultivariateNormal(f,covariance_matrix=K),
@@ -506,7 +509,7 @@ def make_posterior_derivative(evaluate_kernel, f2sigma):
     return _compute_derivative
 
 # ——— Now the squeezed patch ———
-def _wp_derivative_squeezed(self, X, Y, x_new, batch_size=4):
+def _wp_derivative_squeezed(self, X, Y, x_new, batch_size=1):
     raw = make_posterior_derivative(self.evaluate_kernel, self.f2sigma)(
         X, Y, x_new, batch_size
     )
@@ -514,3 +517,4 @@ def _wp_derivative_squeezed(self, X, Y, x_new, batch_size=4):
     return raw.squeeze()
 
 WishartProcess.posterior_derivative = _wp_derivative_squeezed
+WishartLRDProcess.posterior_derivative = _wp_derivative_squeezed
