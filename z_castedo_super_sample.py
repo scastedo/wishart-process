@@ -20,26 +20,26 @@ from scipy.io import loadmat
 import matplotlib.pyplot as plt
 
 
-# HUNGRY_DECONV = np.load('../../Data/predictions_fullTrace_hungry.npy', allow_pickle=True)
-HUNGRY_DECONV = np.load('../Data/predictions_fullTrace_hungry.npy', allow_pickle=True)
+# SATED_DECONV = np.load('../../Data/predictions_fullTrace_sated.npy', allow_pickle=True)
+SATED_DECONV = np.load('../Data/predictions_fullTrace_sated.npy', allow_pickle=True)
 
 
-FOOD_RESTRICTED_HUNGRY = [1,2,3,6,7,9,11,12]
-CONTROL_HUNGRY = [0,4,5,8,10,13]
+FOOD_RESTRICTED_SATED = [1,2,3,6,7,9,11,12]
+CONTROL_SATED = [0,4,5,8,10,13]
 
-# AngStim_data = '../../Data/metadata_deconv/stimAngle_hungry.mat'
-AngStim_data = '../Data/metadata_deconv/stimAngle_hungry.mat'
+# AngStim_data = '../../Data/metadata_deconv/stimAngle_sated.mat'
+AngStim_data = '../Data/metadata_deconv/stimAngle_sated.mat'
 
 ANG_STIM_DATA = loadmat(AngStim_data, simplify_cells= True)
-HUNGRY_ANGLE = ANG_STIM_DATA['order_of_stim_arossAnimals']
-print(HUNGRY_ANGLE[0].shape)
+SATED_ANGLE = ANG_STIM_DATA['order_of_stim_arossAnimals']
+print(SATED_ANGLE[0].shape)
 
-# SfStim_data = '../../Data/metadata_deconv/stimSpatFreq_hungry.mat'
-SfStim_data = '../Data/metadata_deconv/stimSpatFreq_hungry.mat'
+# SfStim_data = '../../Data/metadata_deconv/stimSpatFreq_sated.mat'
+SfStim_data = '../Data/metadata_deconv/stimSpatFreq_sated.mat'
 
 SF_STIM_DATA = loadmat(SfStim_data, simplify_cells= True)
-HUNGRY_SF = SF_STIM_DATA['stimSpatFreq_arossAnimals']
-print(HUNGRY_SF[0].shape)
+SATED_SF = SF_STIM_DATA['stimSpatFreq_arossAnimals']
+print(SATED_SF[0].shape)
 
 def resort_preprocessing(datum,angle_arr,sf_arr,animal):
     data = np.copy(datum[animal,:])
@@ -134,7 +134,7 @@ def calculate_overlap(mu_hat, sigma_hat):
 
 
 def analysis(animal, sf,k):
-    TEST_DATA = resort_preprocessing(HUNGRY_DECONV,HUNGRY_ANGLE,HUNGRY_SF,animal)[:,:,sf,:,40:80]
+    TEST_DATA = resort_preprocessing(SATED_DECONV,SATED_ANGLE,SATED_SF,animal)[:,:,sf,:,40:80]
     TEST_RESPONSE = jnp.nanmean(TEST_DATA,axis = -1) # Shape N x C x K 
     TEST_RESPONSE = jnp.transpose(TEST_RESPONSE, (2,1,0)) # Shape K X C X N
     print(TEST_RESPONSE.shape)
@@ -188,7 +188,6 @@ def analysis(animal, sf,k):
         X_TEST_CONDITIONS = jnp.linspace(0, C-1, 50)
         mu_test_hat, sigma_test_hat, F_test_hat = posterior.sample(X_TEST_CONDITIONS)
     overlaps_super, eigs_super = calculate_overlap(mu_test_hat, sigma_test_hat)
-    
     return overlaps_normal[:,:k], eigs_normal[:,:k], overlaps_super[:,:k], eigs_super[:,:k]
 
 
@@ -203,10 +202,31 @@ eigs_fr_super = np.zeros((8,50,5,k))
 eigs_ctr_normal = np.zeros((6,12,5,k))
 eigs_ctr_super = np.zeros((6,50,5,k))
 
-for i, FR in enumerate(FOOD_RESTRICTED_HUNGRY):
-    FR = 2
-    sf = 2
-    print(f'Food Restricted {FR}, SF {sf+1}')
-    overlaps_fr_normal[i,:,sf,:], eigs_fr_normal[i,:,sf,:], overlaps_fr_super[i,:,sf,:], eigs_fr_super[i,:,sf,:] = analysis(FR,sf,k)
-    
+
+for i, FR in enumerate(FOOD_RESTRICTED_SATED):
+    for sf in range(5):
+        try:
+            overlaps_fr_normal[i,:,sf,:], eigs_fr_normal[i,:,sf,:], overlaps_fr_super[i,:,sf,:], eigs_fr_super[i,:,sf,:] = analysis(FR,sf,k)
+        except Exception as e:
+            # print(f'Error processing Food Restricted {FR}, SF {sf}: {e}')
+            continue
+for i, CTR in enumerate(CONTROL_SATED):
+    for sf in range(5):
+        try:
+            overlaps_ctr_normal[i,:,sf,:], eigs_ctr_normal[i,:,sf,:], overlaps_ctr_super[i,:,sf,:], eigs_ctr_super[i,:,sf,:] = analysis(CTR,sf,k)
+        except Exception as e:
+            # print(f'Error processing Control {CTR}, SF {sf}: {e}')
+            continue
+
+# Save the results in one file
+np.savez('../Data/overlaps_sated_food_restricted_super.npz',
+         overlaps_fr_normal=overlaps_fr_normal,
+         overlaps_fr_super=overlaps_fr_super,
+         eigs_fr_normal=eigs_fr_normal,
+         eigs_fr_super=eigs_fr_super)
+np.savez('../Data/overlaps_sated_control_super.npz',
+         overlaps_ctr_normal=overlaps_ctr_normal,
+         overlaps_ctr_super=overlaps_ctr_super,
+         eigs_ctr_normal=eigs_ctr_normal,
+         eigs_ctr_super=eigs_ctr_super)
 
