@@ -63,6 +63,8 @@ class WishartProcess:
         f = jnp.einsum('ij,mnj->mni',(K_X_x.T@Ki),Y)
         K = K_x_x - K_X_x.T@Ki@K_X_x
         
+        K = K + 1e-4 * jnp.eye(K.shape[-1]) # regularize covariance ADDED BY SEB
+
         F = numpyro.sample(
             'F_test',dist.MultivariateNormal(f,covariance_matrix=K),
             sample_shape=(1,1)
