@@ -37,7 +37,7 @@ class WishartProcess:
         C = x.shape[0]
         L = numpyro.param('L', self.L) if self.optimize_L else self.L
 
-        c_f = self.evaluate_kernel(x,x)
+        c_f = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
 
         F = numpyro.sample(
             'F',dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_f),
@@ -63,7 +63,7 @@ class WishartProcess:
         f = jnp.einsum('ij,mnj->mni',(K_X_x.T@Ki),Y)
         K = K_x_x - K_X_x.T@Ki@K_X_x
         
-        K = K + 1e-4 * jnp.eye(K.shape[-1]) # regularize covariance ADDED BY SEB
+        K = K + 1e-6 * jnp.eye(K.shape[-1]) # regularize covariance ADDED BY SEB
 
         F = numpyro.sample(
             'F_test',dist.MultivariateNormal(f,covariance_matrix=K),
@@ -107,7 +107,7 @@ class WishartProcess:
     def log_prob(self, x, F):
         # TODO: input to this fn must be sigma, not F
         C = x.shape[0]
-        c_f = self.evaluate_kernel(x,x)
+        c_f = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
         LPF = dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_f).log_prob(F)
         return LPF
 
@@ -138,7 +138,7 @@ class WishartLRDProcess:
         C = x.shape[0]
         L = numpyro.param('L', self.L) if self.optimize_L else self.L
 
-        c_f = self.evaluate_kernel(x,x)
+        c_f = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
 
         F = numpyro.sample(
             'F',dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_f),
@@ -210,7 +210,7 @@ class WishartLRDProcess:
     def log_prob(self, x, F):
         # TODO: input to this fn must be sigma, not F
         C = x.shape[0]
-        c_f = self.evaluate_kernel(x,x)
+        c_f = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
         LPF = dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_f).log_prob(F)
         return LPF
     
@@ -227,7 +227,7 @@ class GaussianProcess:
 
     def sample(self, x):
         C = x.shape[0]
-        c_g = self.evaluate_kernel(x,x)
+        c_g = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
         G = numpyro.sample(
             'G',dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_g),
             sample_shape=(self.N,1)
@@ -283,7 +283,7 @@ class GaussianProcess:
     
     def log_prob(self, x, G):
         C = x.shape[0]
-        c_g = self.evaluate_kernel(x,x)
+        c_g = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
         LPG = dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_g).log_prob(G)
         return LPG
 

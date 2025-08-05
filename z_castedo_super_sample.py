@@ -128,32 +128,45 @@ def calculate_overlap(mu_hat, sigma_hat):
         eig_vals[i,:] = eval
         d_mu = mu_hat[i,:] - mu_hat[(i+1)%num_angles,:]
         for j in range(num_evec):
-            square_overlap = np.abs(np.dot(d_mu, evec[:,j])**2 / (np.linalg.norm(d_mu)**2 * np.linalg.norm(evec[:,j])**2))
+            square_overlap = np.power((np.dot(d_mu, evec[:,j])/ (np.linalg.norm(d_mu))),2)
+            # cosine = np.power((np.dot(d_mu, evec[:,j]))/(np.linalg.norm(d_mu) * np.linalg.norm(evec[:,j])),2)
+            # overlap = np.power((np.dot(d_mu, evec[:,j])),2)
             overlaps[i,j] = square_overlap
     return overlaps, eig_vals
 
 
 def analysis(animal, sf,k):
+
+
+
+
     TEST_DATA = resort_preprocessing(SATED_DECONV,SATED_ANGLE,SATED_SF,animal)[:,:,sf,:,40:80]
     TEST_RESPONSE = jnp.nanmean(TEST_DATA,axis = -1) # Shape N x C x K 
-    TEST_RESPONSE = jnp.transpose(TEST_RESPONSE, (2,1,0)) # Shape K X C X N
+    nan_mask = jnp.isnan(TEST_RESPONSE)  # shape (N, C, K)
+    good_k = ~nan_mask.any(axis=(0, 1))  # shape (K,)
+    TEST_RESPONSE = TEST_RESPONSE[:, :, good_k]
     print(TEST_RESPONSE.shape)
+
+    TEST_RESPONSE = jnp.transpose(TEST_RESPONSE, (2,1,0)) # Shape K X C X N
     N = TEST_RESPONSE.shape[2]
     C = TEST_RESPONSE.shape[1]
-    K = TEST_RESPONSE.shape[0]
     SEED = 1
     PERIOD = C
     X_CONDITIONS = jnp.linspace(0,C-1,C)
+    # good_trials = ~jnp.isnan(TEST_RESPONSE).all(axis=(1, 2))   # shape (K,)
+    # TEST_RESPONSE = TEST_RESPONSE[good_trials]                 # (K′, C, N)
+
+
 
     hyperparams = {
-        'sigma_m': 1,
-        'gamma_gp': 1e-5,
-        'beta_gp': 10.0,
-        'sigma_c': .5,
-        'gamma_wp': 1e-6,
-        'beta_wp': 10.0,
-        'p': N+1,
-        }
+        'sigma_m':2.4886496,
+        'gamma_gp': 0.00016234,
+        'beta_gp': 0.24385944,
+        'sigma_c': 0.28382865,
+        'gamma_wp':0.00044405,
+        'beta_wp':1.0398238,
+        'p': 0,
+    }
         
     # Initialise Kernel and Model
     periodic_kernel_gp = lambda x, y: hyperparams['gamma_gp']*(x==y) + hyperparams['beta_gp']*jnp.exp(-jnp.sin(jnp.pi*jnp.abs(x-y)/PERIOD)**2/(hyperparams['sigma_m']))
@@ -161,8 +174,8 @@ def analysis(animal, sf,k):
 
     # Prior distribution (GP and WP)
     gp = models.GaussianProcess(kernel=periodic_kernel_gp,N=N)
-    wp = models.WishartProcess(kernel =periodic_kernel_wp,P=hyperparams['p'],V=1e-2*jnp.eye(N), optimize_L=False)
-    # wp = models.WishartLRDProcess(kernel=periodic_kernel_wp,P=hyperparams['p'],V=1e-2*jnp.eye(N), optimize_L=False)
+    # wp = models.WishartProcess(kernel =periodic_kernel_wp,P=hyperparams['p'],V=1e-2*jnp.eye(N), optimize_L=False)
+    wp = models.WishartLRDProcess(kernel=periodic_kernel_wp,P=hyperparams['p'],V=1e-2*jnp.eye(N), optimize_L=False)
     likelihood = models.NormalConditionalLikelihood(N)
 
     joint = models.JointGaussianWishartProcess(gp,wp,likelihood) 
@@ -173,7 +186,7 @@ def analysis(animal, sf,k):
     adam = optim.Adam(1e-1)
     key = jax.random.PRNGKey(inference_seed)
 
-    varfam.infer(adam,X_CONDITIONS,TEST_RESPONSE,n_iter = 2000,key=key)
+    varfam.infer(adam,X_CONDITIONS,TEST_RESPONSE,n_iter = 1000,key=key)
     joint.update_params(varfam.posterior)
 
     # Posterior distribution
@@ -185,46 +198,46 @@ def analysis(animal, sf,k):
     overlaps_normal, eigs_normal = calculate_overlap(mu_hat, sigma_hat)
 
     with numpyro.handlers.seed(rng_seed=inference_seed):
-        X_TEST_CONDITIONS = jnp.linspace(0, C-1, 50)
+        X_TEST_CONDITIONS = jnp.linspace(0, C-1, NEW_C)
         mu_test_hat, sigma_test_hat, F_test_hat = posterior.sample(X_TEST_CONDITIONS)
     overlaps_super, eigs_super = calculate_overlap(mu_test_hat, sigma_test_hat)
     return overlaps_normal[:,:k], eigs_normal[:,:k], overlaps_super[:,:k], eigs_super[:,:k]
 
-
+NEW_C = 120
 k = 30
 overlaps_fr_normal = np.zeros((8,12,5,k))
-overlaps_fr_super = np.zeros((8,50,5,k))
+overlaps_fr_super = np.zeros((8,NEW_C,5,k))
 overlaps_ctr_normal = np.zeros((6,12,5,k))
-overlaps_ctr_super = np.zeros((6,50,5,k))
+overlaps_ctr_super = np.zeros((6,NEW_C,5,k))
 
 eigs_fr_normal = np.zeros((8,12,5,k))
-eigs_fr_super = np.zeros((8,50,5,k))
+eigs_fr_super = np.zeros((8,NEW_C,5,k))
 eigs_ctr_normal = np.zeros((6,12,5,k))
-eigs_ctr_super = np.zeros((6,50,5,k))
+eigs_ctr_super = np.zeros((6,NEW_C,5,k))
 
 
 for i, FR in enumerate(FOOD_RESTRICTED_SATED):
     for sf in range(5):
-        try:
-            overlaps_fr_normal[i,:,sf,:], eigs_fr_normal[i,:,sf,:], overlaps_fr_super[i,:,sf,:], eigs_fr_super[i,:,sf,:] = analysis(FR,sf,k)
-        except Exception as e:
+        # try:
+        overlaps_fr_normal[i,:,sf,:], eigs_fr_normal[i,:,sf,:], overlaps_fr_super[i,:,sf,:], eigs_fr_super[i,:,sf,:] = analysis(FR,sf,k)
+        # except Exception as e:
             # print(f'Error processing Food Restricted {FR}, SF {sf}: {e}')
-            continue
+        # continue
 for i, CTR in enumerate(CONTROL_SATED):
     for sf in range(5):
-        try:
-            overlaps_ctr_normal[i,:,sf,:], eigs_ctr_normal[i,:,sf,:], overlaps_ctr_super[i,:,sf,:], eigs_ctr_super[i,:,sf,:] = analysis(CTR,sf,k)
-        except Exception as e:
+        # try:
+        overlaps_ctr_normal[i,:,sf,:], eigs_ctr_normal[i,:,sf,:], overlaps_ctr_super[i,:,sf,:], eigs_ctr_super[i,:,sf,:] = analysis(CTR,sf,k)
+        # except Exception as e:
             # print(f'Error processing Control {CTR}, SF {sf}: {e}')
-            continue
+            # continue
 
 # Save the results in one file
-np.savez('../Data/overlaps_sated_food_restricted_super.npz',
+np.savez('../Data/overlaps_sated_food_restricted_super_6.npz',
          overlaps_fr_normal=overlaps_fr_normal,
          overlaps_fr_super=overlaps_fr_super,
          eigs_fr_normal=eigs_fr_normal,
          eigs_fr_super=eigs_fr_super)
-np.savez('../Data/overlaps_sated_control_super.npz',
+np.savez('../Data/overlaps_sated_control_super_6.npz',
          overlaps_ctr_normal=overlaps_ctr_normal,
          overlaps_ctr_super=overlaps_ctr_super,
          eigs_ctr_normal=eigs_ctr_normal,
