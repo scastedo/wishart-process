@@ -12,16 +12,11 @@ import utils
 
 import jax.numpy as jnp
 import numpyro
-
-import itertools
-from tqdm import tqdm
 import numpy as np
 from scipy.io import loadmat
-import matplotlib.pyplot as plt
-
 from pathlib import Path
 import pickle
-import glob, json
+import os, json
 
 
 # SATED_DECONV = np.load('../../Data/predictions_fullTrace_sated.npy', allow_pickle=True)
@@ -140,59 +135,25 @@ def calculate_overlap(mu_hat, sigma_hat, cos = False):
                 distance = np.power((np.dot(d_mu, evec[:,j])),2)
             overlaps[i,j] = distance
     return overlaps, eig_vals
-
-
-def _pick_best_from_npz(path):
-    z = np.load(path, allow_pickle=True)
-    scores = z["scores"]
-    combos = z["combos"]          # dtype=object array of dicts
-    i = int(np.nanargmax(scores))
-    return combos[i].item(), float(scores[i])
-
-def load_best_hp_per_animal(save_glob="randsearch_*.npz"):
-    """Return dict like {'FR_1': {'hp':{...}, 'score':...}, ...}."""
-    out = {}
-    for f in glob.glob(save_glob):
-        tag = f.split("randsearch_")[1].split(".npz")[0]  # e.g. 'FR_1'
-        hp, sc = _pick_best_from_npz(f)
-        out[tag] = {"hp": hp, "score": sc}
-    return out
-
-def load_best_hp_shared(tags, per_animal_hp):
-    """Mean-aggregate across a list of tags (e.g. all FR) to get a single shared HP."""
-    # take the *median* of each scalar hp across animals (robust to outliers)
-    keys = sorted({k for t in tags for k in per_animal_hp[t]["hp"].keys()})
-    med = {}
-    for k in keys:
-        vals = [float(per_animal_hp[t]["hp"].get(k, np.nan)) for t in tags]
-        vals = np.array([v for v in vals if np.isfinite(v)])
-        if vals.size:
-            med[k] = float(np.median(vals))
-    return med
-
-def translate_hp_for_analysis(hp):
-    """
-    Your analysis() expects:
-      sigma_m, gamma_gp, beta_gp  (for GP over angle)
-      sigma_c, gamma_wp, beta_wp  (for WP over angle)
-      p
-    The search produced:
-      l_gp_a, g_gp_a, b_gp_a, l_wp_a, g_wp_a, b_wp_a, p
-    """
+def load_best_hp(animal, out_dir):
+    """Return (best_hp: dict, best_ll: float) for this animal."""
+    json_path = os.path.join(out_dir, f"animal_{animal:02d}.json")
+    with open(json_path, "r") as f:
+        data = json.load(f)
+    return data["best_hp"], float(data["best_ll"])
+def hp_internal_to_user(hp_int: dict) -> dict:
+    """Convert evaluator/random_search dict -> your preferred schema."""
     return {
-        "sigma_m": float(hp.get("l_gp_a", 1.0)),
-        "gamma_gp": float(hp.get("g_gp_a", 1e-4)),
-        "beta_gp": float(hp.get("b_gp_a", 1.0)),
-        "sigma_c": float(hp.get("l_wp_a", 1.0)),
-        "gamma_wp": float(hp.get("g_wp_a", 1e-4)),
-        "beta_wp": float(hp.get("b_wp_a", 1.0)),
-        "p": int(hp.get("p", 0)),
+        "sigma_m": float(hp_int["l_gp_a"]),
+        "gamma_gp": float(hp_int["g_gp_a"]),
+        "beta_gp": float(hp_int["b_gp_a"]),
+        "sigma_c": float(hp_int["l_wp_a"]),
+        "gamma_wp": float(hp_int["g_wp_a"]),
+        "beta_wp": float(hp_int["b_wp_a"]),
+        "p": int(hp_int["p"]),
     }
-
 def analysis(animal, sf, start, stop, array_conditions,
-             save_dir=None, fname_prefix=None,
-             hyperparams_source=None,   # NEW: dict or callable(tag)->dict or None
-             shared_hp=None):           # NEW: fallback shared dict (optional)
+             save_dir=None, fname_prefix=None):
     """
     Runs the pipeline and returns SNR outputs as before,
     but also (optionally) saves overlaps & eigenvalues for later reuse.
@@ -236,21 +197,8 @@ def analysis(animal, sf, start, stop, array_conditions,
     C = TEST_RESPONSE.shape[1]
     PERIOD = C
     X_CONDITIONS = jnp.linspace(0, C - 1, C)
-    tag = f"{fname_prefix}_{animal}" if fname_prefix else str(animal)
-
-    if isinstance(hyperparams_source, dict):
-        # per-animal dict: {'FR_1': {'hp':{...}}, ...}
-        hp_raw = hyperparams_source.get(tag, {}).get("hp", shared_hp or {})
-    elif callable(hyperparams_source):
-        # user-provided function: hp_raw = hyperparams_source(tag)
-        hp_raw = hyperparams_source(tag)
-    else:
-        hp_raw = shared_hp or {}  # None → empty → falls back to defaults below
-
-    if hp_raw:
-        hyperparams = translate_hp_for_analysis(hp_raw)
-    else:
-        print(f"No hyperparams found for {tag}.")
+    best_hp, best_ll = load_best_hp(animal, "hp_runs/sated")
+    hyperparams = hp_internal_to_user(best_hp)
     
     periodic_kernel_gp = lambda x, y: hyperparams['gamma_gp']*(x == y) + \
         hyperparams['beta_gp']*jnp.exp(-jnp.sin(jnp.pi*jnp.abs(x - y)/PERIOD)**2/(hyperparams['sigma_m']))
@@ -259,16 +207,16 @@ def analysis(animal, sf, start, stop, array_conditions,
         hyperparams['beta_wp']*jnp.exp(-jnp.sin(jnp.pi*jnp.abs(x - y)/PERIOD)**2/(hyperparams['sigma_c']))
 
     gp = models.GaussianProcess(kernel=periodic_kernel_gp, N=N)
-    # ===== NEW: anchor V to the (K*C)-pooled covariance so noise doesn't shrink =====
-    # pooled across trials & conditions: TEST_RESPONSE is (K, C, N)
-    Y = np.asarray(TEST_RESPONSE)          # move to CPU NumPy
-    YC = Y.reshape(-1, N)                  # (K*C, N)
-    YC = YC - YC.mean(axis=0, keepdims=True)
-    Sigma0 = (YC.T @ YC) / max(YC.shape[0], 1)   # (N, N)
-    p_val = int(max(hyperparams['p'], 1))
-    V0 = Sigma0 * float(p_val)             # so E[Σ] = V0 / p ≈ Sigma0
-    V0 = jnp.array(V0, dtype=jnp.float32)
-    # ===== end NEW =====
+    # # ===== NEW: anchor V to the (K*C)-pooled covariance so noise doesn't shrink =====
+    # # pooled across trials & conditions: TEST_RESPONSE is (K, C, N)
+    # Y = np.asarray(TEST_RESPONSE)          # move to CPU NumPy
+    # YC = Y.reshape(-1, N)                  # (K*C, N)
+    # YC = YC - YC.mean(axis=0, keepdims=True)
+    # Sigma0 = (YC.T @ YC) / max(YC.shape[0], 1)   # (N, N)
+    # p_val = int(max(hyperparams['p'], 1))
+    # V0 = Sigma0 * float(p_val)             # so E[Σ] = V0 / p ≈ Sigma0
+    # V0 = jnp.array(V0, dtype=jnp.float32)
+    # # ===== end NEW =====
 
     wp = models.WishartLRDProcess(kernel=periodic_kernel_wp,
                                   P=hyperparams['p'],
@@ -347,4 +295,23 @@ def analysis(animal, sf, start, stop, array_conditions,
     return SNR_OUTPUTS, saved_summary
 
 
+conditions_array = [12 , 72]
+SAVE_DIR = "saved_overlap_eigs"  # create this folder if it doesn't exist
 
+# FULL FR
+snr_outputs_mean_fr_full = np.zeros((len(FOOD_RESTRICTED_SATED), 5, len(conditions_array)))
+for i, animal in enumerate(FOOD_RESTRICTED_SATED):
+    for sf in range(5):
+        snr_outputs_mean_fr_full[i, sf, :], _ = analysis(
+            animal, sf=sf, start=40, stop=80, array_conditions=conditions_array,
+            save_dir=SAVE_DIR, fname_prefix="FR"
+        )
+
+# FULL CTR
+# snr_outputs_mean_ctr_full = np.zeros((len(CONTROL_SATED), 5, len(conditions_array)))
+# for i, animal in enumerate(CONTROL_SATED):
+#     for sf in range(2):
+#         snr_outputs_mean_ctr_full[i, sf, :], _ = analysis(
+#             animal, sf=sf, start=40, stop=80, array_conditions=conditions_array,
+#             save_dir=SAVE_DIR, fname_prefix="CTR"
+#         )
