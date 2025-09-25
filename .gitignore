@@ -141,4 +141,4 @@ cython_debug/
 # images and videos
 *.mp4
 *.png
-*.jpg
+*.jpgz_old/old_files/sampled_dim_noise.npy
