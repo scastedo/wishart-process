@@ -24,8 +24,8 @@ import matplotlib.pyplot as plt
 SATED_DECONV = np.load('../Data/predictions_fullTrace_sated.npy', allow_pickle=True)
 
 
-FOOD_RESTRICTED_SATED = [1,2,3,6,7,9,11,12]
-CONTROL_SATED = [0,4,5,8,10,13]
+FOOD_RESTRICTED_SATED = [1,2,3,6,7,8,11,12]
+CONTROL_SATED         = [0,4,5,9,10,13]
 
 # AngStim_data = '../../Data/metadata_deconv/stimAngle_sated.mat'
 AngStim_data = '../Data/metadata_deconv/stimAngle_sated.mat'
@@ -128,19 +128,14 @@ def calculate_overlap(mu_hat, sigma_hat):
         eig_vals[i,:] = eval
         d_mu = mu_hat[i,:] - mu_hat[(i+1)%num_angles,:]
         for j in range(num_evec):
-            square_overlap = np.power((np.dot(d_mu, evec[:,j])/ (np.linalg.norm(d_mu))),2)
-            # cosine = np.power((np.dot(d_mu, evec[:,j]))/(np.linalg.norm(d_mu) * np.linalg.norm(evec[:,j])),2)
+            cosine = np.power((np.dot(d_mu, evec[:,j])/ (np.linalg.norm(d_mu))),2)
             # overlap = np.power((np.dot(d_mu, evec[:,j])),2)
-            overlaps[i,j] = square_overlap
+            overlaps[i,j] = cosine
     return overlaps, eig_vals
 
 
-def analysis(animal, sf,k):
-
-
-
-
-    TEST_DATA = resort_preprocessing(SATED_DECONV,SATED_ANGLE,SATED_SF,animal)[:,:,sf,:,40:80]
+def analysis(animal, sf):
+    TEST_DATA = resort_preprocessing(SATED_DECONV,SATED_ANGLE,SATED_SF,animal)[:,:,sf,:,70:80]
     TEST_RESPONSE = jnp.nanmean(TEST_DATA,axis = -1) # Shape N x C x K 
     nan_mask = jnp.isnan(TEST_RESPONSE)  # shape (N, C, K)
     good_k = ~nan_mask.any(axis=(0, 1))  # shape (K,)
@@ -201,45 +196,70 @@ def analysis(animal, sf,k):
         X_TEST_CONDITIONS = jnp.linspace(0, C-1, NEW_C)
         mu_test_hat, sigma_test_hat, F_test_hat = posterior.sample(X_TEST_CONDITIONS)
     overlaps_super, eigs_super = calculate_overlap(mu_test_hat, sigma_test_hat)
-    return overlaps_normal[:,:k], eigs_normal[:,:k], overlaps_super[:,:k], eigs_super[:,:k]
-
-NEW_C = 120
-k = 30
-overlaps_fr_normal = np.zeros((8,12,5,k))
-overlaps_fr_super = np.zeros((8,NEW_C,5,k))
-overlaps_ctr_normal = np.zeros((6,12,5,k))
-overlaps_ctr_super = np.zeros((6,NEW_C,5,k))
-
-eigs_fr_normal = np.zeros((8,12,5,k))
-eigs_fr_super = np.zeros((8,NEW_C,5,k))
-eigs_ctr_normal = np.zeros((6,12,5,k))
-eigs_ctr_super = np.zeros((6,NEW_C,5,k))
+    return overlaps_normal[:,:], eigs_normal[:,:], overlaps_super[:,:], eigs_super[:,:]
 
 
-for i, FR in enumerate(FOOD_RESTRICTED_SATED):
-    for sf in range(5):
-        # try:
-        overlaps_fr_normal[i,:,sf,:], eigs_fr_normal[i,:,sf,:], overlaps_fr_super[i,:,sf,:], eigs_fr_super[i,:,sf,:] = analysis(FR,sf,k)
-        # except Exception as e:
-            # print(f'Error processing Food Restricted {FR}, SF {sf}: {e}')
-        # continue
-for i, CTR in enumerate(CONTROL_SATED):
-    for sf in range(5):
-        # try:
-        overlaps_ctr_normal[i,:,sf,:], eigs_ctr_normal[i,:,sf,:], overlaps_ctr_super[i,:,sf,:], eigs_ctr_super[i,:,sf,:] = analysis(CTR,sf,k)
-        # except Exception as e:
-            # print(f'Error processing Control {CTR}, SF {sf}: {e}')
-            # continue
+NEW_C = 48
+N_SF = 5
+C_NORMAL = 12
 
-# Save the results in one file
-np.savez('../Data/overlaps_sated_food_restricted_super_6.npz',
-         overlaps_fr_normal=overlaps_fr_normal,
-         overlaps_fr_super=overlaps_fr_super,
-         eigs_fr_normal=eigs_fr_normal,
-         eigs_fr_super=eigs_fr_super)
-np.savez('../Data/overlaps_sated_control_super_6.npz',
-         overlaps_ctr_normal=overlaps_ctr_normal,
-         overlaps_ctr_super=overlaps_ctr_super,
-         eigs_ctr_normal=eigs_ctr_normal,
-         eigs_ctr_super=eigs_ctr_super)
+def collect_group(animal_ids):
+    """Run analysis per animal, stack over sf, and record each animal's k."""
+    overlaps_normal_dict = {}
+    eigs_normal_dict = {}
+    overlaps_super_dict  = {}
+    eigs_super_dict      = {}
+    k_per_animal = {}
+    
+    for animal in animal_ids:
+        on_list, en_list, os_list, es_list = [], [], [], []
+        k_list = []
+        for sf in range(N_SF):
+            # Each of these should be (12, k_sf) and (NEW_C, k_sf) respectively.
+            on, en, os, es = analysis(animal, sf)
+            # track k for this sf
+            k_sf = on.shape[-1]
+            k_list.append(k_sf)
+            on_list.append(on)
+            en_list.append(en)
+            os_list.append(os)
+            es_list.append(es)
 
+        # If k varies across sf for this animal, be conservative and use the minimum.
+        k_i = int(min(k_list))
+        k_per_animal[animal] = k_i
+        
+        # Stack over sf to get (12, N_SF, k_i) and (NEW_C, N_SF, k_i)
+        overlaps_normal_dict[animal] = np.stack([a[:, :k_i] for a in on_list], axis=1)
+        eigs_normal_dict[animal]     = np.stack([a[:, :k_i] for a in en_list], axis=1)
+        overlaps_super_dict[animal]  = np.stack([a[:, :k_i] for a in os_list], axis=1)
+        eigs_super_dict[animal]      = np.stack([a[:, :k_i] for a in es_list], axis=1)
+
+    return overlaps_normal_dict, eigs_normal_dict, overlaps_super_dict, eigs_super_dict, k_per_animal
+
+# --- Run for FR and CTR ---
+
+FR_IDS = list(FOOD_RESTRICTED_SATED)
+CTR_IDS = list(CONTROL_SATED)
+
+# Collect per-animal, variable-k results
+(fr_on, fr_en, fr_os, fr_es, fr_kdict) = collect_group(FR_IDS)
+(ct_on, ct_en, ct_os, ct_es, ct_kdict) = collect_group(CTR_IDS)
+
+
+
+# build dicts as above (fr_on, fr_en, fr_os, fr_es)
+np.savez_compressed('../Data/overlaps_sated_fr_ragged_5_late.npz',
+    overlaps_normal=np.array(fr_on, dtype=object),
+    eigs_normal=np.array(fr_en, dtype=object),
+    overlaps_super=np.array(fr_os, dtype=object),
+    eigs_super=np.array(fr_es, dtype=object))
+np.savez_compressed('../Data/overlaps_sated_ctr_ragged_5_late.npz',
+    overlaps_normal=np.array(ct_on, dtype=object),
+    eigs_normal=np.array(ct_en, dtype=object),
+    overlaps_super=np.array(ct_os, dtype=object),
+    eigs_super=np.array(ct_es, dtype=object))
+
+# # later:
+# rag = np.load('../Data/overlaps_sated_fr_ragged.npz', allow_pickle=True)
+# overlaps_normal_dict = rag['overlaps_normal'].item()  # dict[str->ndarray]

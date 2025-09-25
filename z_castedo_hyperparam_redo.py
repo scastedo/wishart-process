@@ -65,45 +65,26 @@ def resort_preprocessing(datum,angle_arr,sf_arr,animal):
     reshaped_data = np.stack(reshaped_data,axis=2)    
 
     return reshaped_data
-def make_evaluator(N, period, two_d, x_tr, y_tr, x_te, y_te,
-                   n_vi_steps=1500, n_mc=8, df_min=0, V_scale=1e-2):
 
-    data = (x_tr, y_tr, x_te, y_te)        # captured in the closure
+
+
+def make_evaluator(N, period, x_tr, y_tr, x_te, y_te,
+                   n_vi_steps=1500, n_mc=20, V_scale=1e-1):
 
     # @jax.jit                              # now only (key, hyper) are args
     def _evaluate(key, hyper):
-        if two_d:
-            # angle kernel (periodic)
-            per_gp = lambda a, b: hyper["g_gp_a"] * (a == b) + hyper["b_gp_a"] * jnp.exp(
-                -jnp.sin(jnp.pi * jnp.abs(a - b) / period) ** 2 / hyper["l_gp_a"]
-            )
-            per_wp = lambda a, b: hyper["g_wp_a"] * (a == b) + hyper["b_wp_a"] * jnp.exp(
-                -jnp.sin(jnp.pi * jnp.abs(a - b) / period) ** 2 / hyper["l_wp_a"]
-            )
-            # SF kernel (squared‑exp)
-            sq_gp = lambda a, b: hyper["g_gp_s"] * (a == b) + hyper["b_gp_s"] * jnp.exp(
-                -(a - b) ** 2 / hyper["l_gp_s"]
-            )
-            sq_wp = lambda a, b: hyper["g_wp_s"] * (a == b) + hyper["b_wp_s"] * jnp.exp(
-                -(a - b) ** 2 / hyper["l_wp_s"]
-            )
-
-            K_gp = lambda x, y: per_gp(x[0], y[0]) * sq_gp(x[1], y[1])
-            K_wp = lambda x, y: per_wp(x[0], y[0]) * sq_wp(x[1], y[1])
-        else:
-            K_gp = lambda a, b: hyper["g_gp_a"] * (a == b) + hyper["b_gp_a"] * jnp.exp(
-                -jnp.sin(jnp.pi * jnp.abs(a - b) / period) ** 2 / hyper["l_gp_a"]
-            )
-            K_wp = lambda a, b: hyper["g_wp_a"] * (a == b) + hyper["b_wp_a"] * jnp.exp(
-                -jnp.sin(jnp.pi * jnp.abs(a - b) / period) ** 2 / hyper["l_wp_a"]
-            )
+        K_gp = lambda a, b: hyper["g_gp_a"] * (a == b) + hyper["b_gp_a"] * jnp.exp(
+            -jnp.sin(jnp.pi * jnp.abs(a - b) / period) ** 2 / hyper["l_gp_a"]
+        )
+        K_wp = lambda a, b: hyper["g_wp_a"] * (a == b) + hyper["b_wp_a"] * jnp.exp(
+            -jnp.sin(jnp.pi * jnp.abs(a - b) / period) ** 2 / hyper["l_wp_a"]
+        )
 
         # --- model -----------------------------------------------------------
-        gp = models.GaussianProcess(kernel=K_gp, N=N)
-        P  = max(int(hyper["p"]), df_min)                           # any value ≥ N is valid
+        gp = models.GaussianProcess(kernel=K_gp, N=N)                   
         wp = models.WishartLRDProcess(
             kernel      = K_wp,
-            P           = P,
+            P           =  int(hyper["p"]) ,
             V           = V_scale * jnp.eye(N),
             optimize_L  = False,               # as before
         )
@@ -112,7 +93,7 @@ def make_evaluator(N, period, two_d, x_tr, y_tr, x_te, y_te,
 
         # --- VI --------------------------------------------------------------
         guide = inference.VariationalNormal(joint.model)
-        optimizer = optim.Adam(1e-1)
+        optimizer = optim.Adam(1e-2)
         svi_key = jax.random.split(key, 1)[0]
 
         try:
@@ -129,8 +110,11 @@ def make_evaluator(N, period, two_d, x_tr, y_tr, x_te, y_te,
                 mu, Sigma, _ = posterior.sample(x_te)
                 # average log-prob over all test observations
             return lik.log_prob(y_obs, mu, Sigma).mean()
-        mc_keys = jax.random.split(key, n_mc)         # n_mc independent keys
+        k_svi, k_mc = jax.random.split(key)
+        mc_keys = jax.random.split(k_mc, n_mc)
+        # mc_keys = jax.random.split(key, n_mc)         # n_mc independent keys
         score   = jax.vmap(_one_draw)(mc_keys).mean()  # ← Monte-Carlo average
+
         return score
     return _evaluate
 
@@ -139,7 +123,7 @@ def make_evaluator(N, period, two_d, x_tr, y_tr, x_te, y_te,
 #  B.  Random search driver
 # -----------------------------------------------------------------------------
 
-def sample_hyperparams(key: jax.Array, two_d: bool) -> Dict[str, float]:
+def sample_hyperparams(key: jax.Array) -> Dict[str, float]:
     """Draw a random hyper‑parameter point (log‑uniform priors)."""
     k1, k2, k3, k4, k5, k6, k7 = jax.random.split(key, 7)
 
@@ -158,31 +142,17 @@ def sample_hyperparams(key: jax.Array, two_d: bool) -> Dict[str, float]:
         "b_gp_a": _logu(k3, 0.05, 2.0),
 
         # WP for the covariance ---------------------------------------------
-        "l_wp_a": _logu(k4, 0.2, 3.0),
-        "g_wp_a": _logu(k5, 1e-5, 1e-3),
-        "b_wp_a": _logu(k6, 0.05, 2.0),
+        "l_wp_a": _logu(k4, 0.07, 3.0),
+        "g_wp_a": _logu(k5, 1e-5, 1e-1),
+        "b_wp_a": _logu(k6, 0.1, 5.0),
         "p": int(jax.random.randint(k7, (), 0, 6)),   # 0‥5 inclusive
 
     }
-    if two_d:
-        k7, k8, k9, k10, k11, k12 = jax.random.split(k6, 6)
-        hp.update(
-            {
-                "l_gp_s": _logu(k7, 0.1, 5.0),
-                "g_gp_s": _logu(k8, 1e-6, 1e-3),
-                "b_gp_s": _logu(k9, 0.05, 2.0),
-                "l_wp_s": _logu(k10, 0.2, 5.0),
-                "g_wp_s": _logu(k11, 1e-6, 1e-3),
-                "b_wp_s": _logu(k12, 0.05, 4.0),
-            }
-        )
     return hp
 
 
 def random_search(
     eval_fn,
-    data_tuple,
-    two_d: bool,
     n_draws: int = 200,
     seed: int = 0,
 ):
@@ -192,7 +162,7 @@ def random_search(
     key = jax.random.PRNGKey(seed)
     for i in tqdm(range(n_draws), desc="random search"):
         key, sub = jax.random.split(key)
-        hp = sample_hyperparams(sub, two_d)
+        hp = sample_hyperparams(sub)
         score = float(eval_fn(sub, hp))  # cast to Py float for tqdm
         scores.append(score)
         combos.append(hp)
@@ -206,89 +176,131 @@ def random_search(
 # -----------------------------------------------------------------------------
 #  C.  Main
 # -----------------------------------------------------------------------------
+import json, numbers
+import os
+def to_jsonable(x):
+    # Already JSON-safe
+    if x is None or isinstance(x, (bool, int, float, str)):
+        return x
+    # NumPy scalar -> Python scalar
+    if isinstance(x, np.generic):
+        return x.item()
+    # JAX/NumPy arrays -> list or scalar
+    if isinstance(x, (jax.Array, jnp.ndarray, np.ndarray)):
+        arr = np.asarray(x)
+        return arr.item() if arr.shape == () else arr.tolist()
+    # Other numeric types
+    if isinstance(x, numbers.Number):
+        return float(x)
+    # Mappings
+    if isinstance(x, dict):
+        return {str(k): to_jsonable(v) for k, v in x.items()}
+    # Sequences / sets
+    if isinstance(x, (list, tuple, set)):
+        return [to_jsonable(v) for v in x]
+    # Fallback: string representation
+    return str(x)
 
-def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--animal", type=int, default=0)
-    parser.add_argument("--two_d", type=int, default=1)  # 0/1
-    parser.add_argument("--n_draws", type=int, default=200)
-    parser.add_argument("--steps", type=int, default=1500)
-    parser.add_argument("--seed", type=int, default=0)
-    args = parser.parse_args()
+def save_best_hp(animal, best_hp, best_ll, scores, combos, out_dir):
+    os.makedirs(out_dir, exist_ok=True)
+    # JSON: easy to read later
+    json_path = os.path.join(out_dir, f"animal_{animal:02d}.json")
+    with open(json_path, "w") as f:
+        json.dump(
+            {
+                "animal": int(animal),
+                "best_ll": to_jsonable(best_ll),
+                "best_hp": to_jsonable(best_hp),
+                "scores": to_jsonable(scores),
+                "combos": to_jsonable(combos),
+            },
+            f,
+            indent=2,
+        )
+    # Optional: raw arrays in NPZ (handy for debugging)
+    npz_path = os.path.join(out_dir, f"animal_{animal:02d}.npz")
+    np.savez(
+        npz_path,
+        best_ll=np.array(best_ll),
+        # store best_hp as a 0-d object array (still fine in npz)
+        best_hp=np.array(best_hp, dtype=object),
+        scores=np.asarray(scores),
+        combos=np.array(combos, dtype=object),
+    )
+    return json_path
+# --- your analysis ------------------------------------------------------------
 
-    # --------------------------------------------------- load + preprocess data
-    # HUNGRY_DECONV = np.load("../Data/predictions_fullTrace_hungry.npy", allow_pickle=True)
-    # ANG = np.load("../Data/angles.npy", allow_pickle=True)
-    # SF = np.load("../Data/spatfreq.npy", allow_pickle=True)
+def analyse(animal, seed, n_draws, steps, out_dir="hp_runs/sated"):
+    # ------------- load & prepare data
+    SATED_DECONV = np.load('../Data/predictions_fullTrace_sated.npy', allow_pickle=True)
+    AngStim_data = '../Data/metadata_deconv/stimAngle_sated.mat'
+    ANG_STIM_DATA = loadmat(AngStim_data, simplify_cells=True)
+    SATED_ANGLE = ANG_STIM_DATA['order_of_stim_arossAnimals']
+    SfStim_data = '../Data/metadata_deconv/stimSpatFreq_sated.mat'
+    SF_STIM_DATA = loadmat(SfStim_data, simplify_cells=True)
+    SATED_SF = SF_STIM_DATA['stimSpatFreq_arossAnimals']
 
+    TEST_DATA = resort_preprocessing(SATED_DECONV, SATED_ANGLE, SATED_SF, animal)[:, :, :, :, 40:80]
 
-    HUNGRY_DECONV = np.load('../Data/predictions_fullTrace_hungry.npy', allow_pickle=True)
-    FOOD_RESTRICTED_HUNGRY = [1,2,3,6,7,9,11,12]
-    CONTROL_HUNGRY = [0,4,5,8,10,13]
+    best_test = np.zeros((TEST_DATA.shape[0], TEST_DATA.shape[1], TEST_DATA.shape[3], TEST_DATA.shape[4]))
+    for i in range(TEST_DATA.shape[0]):
+        best_sf = np.argmax(np.nanmean(TEST_DATA[i, :, :, :, :], axis=(0, 2, 3))).astype('int')
+        best_test[i, :, :, :] = TEST_DATA[i, :, best_sf, :, :]
 
-    AngStim_data = '../Data/metadata_deconv/stimAngle_hungry.mat'
-    ANG_STIM_DATA = loadmat(AngStim_data, simplify_cells= True)
-    ANG = ANG_STIM_DATA['order_of_stim_arossAnimals']
+    TEST_RESPONSE = np.nanmean(best_test, axis=-1)  # Shape N x C x K
+    good_trials = ~jnp.isnan(TEST_RESPONSE).any(axis=(0, 1))   # shape (K,)
+    # Apply mask to keep only good trials
+    TEST_RESPONSE = TEST_RESPONSE[:, :, good_trials]           # shape (N, C, K')
+    # good_trials = ~np.isnan(TEST_RESPONSE).all(axis=(1, 2))   # shape (K,)
+    # TEST_RESPONSE = TEST_RESPONSE[good_trials]                 # (K′, C, N)
 
-    SfStim_data = '../Data/metadata_deconv/stimSpatFreq_hungry.mat'
-    SF_STIM_DATA = loadmat(SfStim_data, simplify_cells= True)
-    SF = SF_STIM_DATA['stimSpatFreq_arossAnimals']
+    # K = TEST_RESPONSE.shape[0]
+    y_full = jnp.transpose(TEST_RESPONSE, (2, 1, 0))  # (N, C, K′)
+    K, C, N = y_full.shape
+    x_full = jnp.arange(C)[:, None]
+    period = C
 
-    td = bool(args.two_d)
-
-    if td:
-        # N × C_a × C_s × K  →  K × (C_a*C_s) × N
-        TEST_DATA = resort_preprocessing(HUNGRY_DECONV,ANG,SF,args.animal)[:,:,:,:,40:80]
-        TEST_RESPONSE = jnp.nanmean(TEST_DATA, axis=-1)
-        good_trials = ~jnp.isnan(TEST_RESPONSE).all(axis=(1, 2, 3))   # shape (K,)
-        TEST_RESPONSE = TEST_RESPONSE[good_trials]                 # (K′, C, N)
-        N, Ca, Cs, K = TEST_RESPONSE.shape[0], *TEST_RESPONSE.shape[1:3], TEST_RESPONSE.shape[3]
-        x_full = jnp.stack(jnp.meshgrid(jnp.arange(Ca), jnp.arange(Cs), indexing="ij"), axis=-1).reshape(-1, 2)
-        y_full = jnp.transpose(TEST_RESPONSE.reshape(N, Ca * Cs, K), (2, 1, 0))
-        period = Ca
-    else:
-        TEST_DATA = resort_preprocessing(HUNGRY_DECONV,ANG,SF,args.animal)[:,:,1,:,40:80] # Select SF 1
-        # N × C × K  →  K × C × N
-        TEST_RESPONSE = jnp.nanmean(TEST_DATA, axis=-1)
-        good_trials = ~jnp.isnan(TEST_RESPONSE).all(axis=(1, 2))   # shape (K,)
-        TEST_RESPONSE = TEST_RESPONSE[good_trials]                 # (K′, C, N)
-        K = TEST_RESPONSE.shape[0]
-        y_full = jnp.transpose(TEST_RESPONSE, (2, 1, 0))
-        K, C, N = y_full.shape
-        x_full = jnp.arange(C)[:, None]
-        period = C
-
-    # ------------------------------------------------------- split train / test
+    # -------- train/test split
     data = utils.split_data(
         x=x_full,
         y=y_full,
         train_trial_prop=0.8,
         train_condition_prop=0.8,
-        seed=args.seed,
+        seed=seed,
     )
     x_tr, y_tr, _, _, x_te, y_te, *_ = data
-    if not td:
-        x_tr, x_te = x_tr.reshape(-1), x_te.reshape(-1)
+    x_tr, x_te = x_tr.reshape(-1), x_te.reshape(-1)
 
-    data_tuple = (x_tr, y_tr, x_te, y_te)
+    # -------- evaluator + search
+    # IMPORTANT: ensure make_evaluator uses y_obs = y_te (targets), not a misnamed key
+    eval_fn = make_evaluator(N, period, x_tr, y_tr, x_te, y_te, n_vi_steps=steps)
 
-    # ------------------------------------------------------- evaluator + search
-    eval_fn = make_evaluator(N, period, td, x_tr, y_tr, x_te, y_te, n_vi_steps=args.steps)
+    # per-animal deterministic seed (optional): combine base seed & animal id
+    per_animal_seed = int(jax.random.key_data(jax.random.PRNGKey(seed))[0] ^ animal)
+
     best_hp, best_ll, scores, combos = random_search(
-        eval_fn, data_tuple, td, n_draws=args.n_draws, seed=args.seed
+        eval_fn,
+        n_draws=n_draws,
+        seed=per_animal_seed,
     )
 
-    print("\n🏆 best log‑lik:", best_ll)
-    print("   best hyper‑params:\n", best_hp)
+    print(f"\n[animal {animal}] 🏆 best log-lik: {best_ll:.3f}")
+    print("best hyper-params:\n", best_hp)
 
-    np.savez(
-        "random_search_results.npz",
-        best_hp=best_hp,
-        best_ll=best_ll,
-        scores=scores,
-        combos=np.array(combos, dtype=object),
-    )
+    # save per-animal
+    path = save_best_hp(animal, best_hp, best_ll, scores, combos, out_dir)
+    print(f"[animal {animal}] saved → {path}")
 
+    return best_hp, best_ll
+
+# --- runner -------------------------------------------------------------------
 
 if __name__ == "__main__":
-    main()
+    ALL_ANIMALS = list(range(14))
+    ndraws = 500
+    steps = 3000
+    base_seed = 0
+    out_dir = "hp_runs/sated"  # change if you want a different directory
+
+    for animal in tqdm(sorted(ALL_ANIMALS), desc="animals"):
+        analyse(animal=animal, seed=base_seed, n_draws=ndraws, steps=steps, out_dir=out_dir)
