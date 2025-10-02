@@ -188,17 +188,20 @@ def analysis(animal, sf, start, stop, array_conditions,
         TEST_DATA = resort_preprocessing(SATED_DECONV, SATED_ANGLE, SATED_SF, animal)[:, :, sf, :, start:stop]
         TEST_RESPONSE = jnp.nanmean(TEST_DATA, axis=-1)  # Shape N x C x K
 
-    nan_mask = jnp.isnan(TEST_RESPONSE)     # (N, C, K)
-    good_k = ~nan_mask.any(axis=(0, 1))     # (K,)
-    TEST_RESPONSE = TEST_RESPONSE[:, :, good_k]
 
-    TEST_RESPONSE = jnp.transpose(TEST_RESPONSE, (2, 1, 0))  # Shape K x C x N
-    N = TEST_RESPONSE.shape[2]
-    C = TEST_RESPONSE.shape[1]
+    good_trials = ~jnp.isnan(TEST_RESPONSE).any(axis=(0, 1))   # shape (K,)
+    # nan_mask = jnp.isnan(TEST_RESPONSE)     # (N, C, K)
+    # good_k = ~nan_mask.all(axis=(0, 1))     # (K,)
+    TEST_RESPONSE_full = TEST_RESPONSE[:, :, good_trials]
+    N_full = int(TEST_RESPONSE_full.shape[0])
+    C = int(TEST_RESPONSE_full.shape[1])
     PERIOD = C
-    X_CONDITIONS = jnp.linspace(0, C - 1, C)
+    array_conditions = [int(c) for c in array_conditions]
+    n_cond = len(array_conditions)
+    X_CONDITIONS_ALL = jnp.linspace(0, C - 1, C)
     best_hp, best_ll = load_best_hp(animal, "hp_runs/sated")
     hyperparams = hp_internal_to_user(best_hp)
+
     
     periodic_kernel_gp = lambda x, y: hyperparams['gamma_gp']*(x == y) + \
         hyperparams['beta_gp']*jnp.exp(-jnp.sin(jnp.pi*jnp.abs(x - y)/PERIOD)**2/(hyperparams['sigma_m']))
@@ -206,77 +209,82 @@ def analysis(animal, sf, start, stop, array_conditions,
     periodic_kernel_wp = lambda x, y: hyperparams['gamma_wp']*(x == y) + \
         hyperparams['beta_wp']*jnp.exp(-jnp.sin(jnp.pi*jnp.abs(x - y)/PERIOD)**2/(hyperparams['sigma_c']))
 
-    gp = models.GaussianProcess(kernel=periodic_kernel_gp, N=N)
-    # # ===== NEW: anchor V to the (K*C)-pooled covariance so noise doesn't shrink =====
-    # # pooled across trials & conditions: TEST_RESPONSE is (K, C, N)
-    # Y = np.asarray(TEST_RESPONSE)          # move to CPU NumPy
-    # YC = Y.reshape(-1, N)                  # (K*C, N)
-    # YC = YC - YC.mean(axis=0, keepdims=True)
-    # Sigma0 = (YC.T @ YC) / max(YC.shape[0], 1)   # (N, N)
-    # p_val = int(max(hyperparams['p'], 1))
-    # V0 = Sigma0 * float(p_val)             # so E[Σ] = V0 / p ≈ Sigma0
-    # V0 = jnp.array(V0, dtype=jnp.float32)
-    # # ===== end NEW =====
 
-    wp = models.WishartLRDProcess(kernel=periodic_kernel_wp,
-                                  P=hyperparams['p'],
-                                  V=V0,
-                                  optimize_L=True)  # allow learning around the anchor
-    likelihood = models.NormalConditionalLikelihood(N)
 
-    joint = models.JointGaussianWishartProcess(gp, wp, likelihood)
+    num_repeats = 10
+    rng = np.random.default_rng(2)
+    snr_all = np.full((num_repeats, len(array_conditions)), np.nan, dtype=float)
+    for r in range(num_repeats):
+        # ---- random subsample of neurons ----
+        idx_random = rng.choice(N_full, MIN_NEURONS, replace=False)
+        TR = TEST_RESPONSE_full[idx_random, :, :]          # (MIN x C x K)
+        TR = jnp.transpose(TR, (2, 1, 0))           # K x C x N_sub
+        N_sub = int(TR.shape[2])
 
-    inference_seed = 2
-    varfam = inference.VariationalNormal(joint.model)
-    adam = optim.Adam(1e-1)
-    key = jax.random.PRNGKey(inference_seed)
 
-    varfam.infer(adam, X_CONDITIONS, TEST_RESPONSE, n_iter=1000, key=key)
-    joint.update_params(varfam.posterior)
+        gp = models.GaussianProcess(kernel=periodic_kernel_gp, N=N_sub)
 
-    posterior = models.NormalGaussianWishartPosterior(joint, varfam, X_CONDITIONS)
+        # wp = models.WishartProcess(kernel =periodic_kernel_wp,P=hyperparams['p'],V=1e-2*jnp.eye(N), optimize_L=False)
+        wp = models.WishartLRDProcess(kernel=periodic_kernel_wp,P=hyperparams['p'],V=1e-1*jnp.eye(N_sub), optimize_L=False)
 
-    # -------- NEW: storage for saving overlaps/eigs per condition --------
-    overlaps_per_condition = []  # list of np.ndarray, each shape ~ (num_angles, num_evec)
-    eigs_per_condition = []      # list of np.ndarray, each shape ~ (num_angles, num_evec)
-    angles_per_condition = []    # list of ints, the condition_number (i.e., #angles)
-    snr_per_condition = []       # list of floats
+        likelihood = models.NormalConditionalLikelihood(N_sub)
 
-    SNR_OUTPUTS = np.zeros((len(array_conditions)))
+        joint = models.JointGaussianWishartProcess(gp, wp, likelihood)
 
-    # Sample & compute per requested condition grid
-    for idx, condition_number in enumerate(array_conditions):
-        with numpyro.handlers.seed(rng_seed=inference_seed):
-            X_TEST_CONDITIONS = jnp.linspace(0, C - 1, condition_number)
-            mu_test_hat, sigma_test_hat, F_test_hat = posterior.sample(X_TEST_CONDITIONS)
+        inference_seed = 2
+        varfam = inference.VariationalNormal(joint.model)
+        adam = optim.Adam(1e-1)
+        key = jax.random.PRNGKey(inference_seed)
 
-        overlaps_super, eigs_super = calculate_overlap(mu_test_hat, sigma_test_hat, cos=False)  # (~angles, ~evec)
-        overlaps_np = np.asarray(overlaps_super)
-        eigs_np = np.asarray(eigs_super)
+        varfam.infer(adam, X_CONDITIONS_ALL, TR, n_iter=1500, key=key)
+        joint.update_params(varfam.posterior)
+        
 
-        # SNR aggregation (as you already do)
-        snr_per_angle = np.nanmean(overlaps_np / eigs_np, axis=1)
-        snr_mean = np.nanmean(snr_per_angle)
+        posterior = models.NormalGaussianWishartPosterior(joint, varfam, X_CONDITIONS_ALL)
 
-        # Save into our lists
-        overlaps_per_condition.append(overlaps_np)
-        eigs_per_condition.append(eigs_np)
-        angles_per_condition.append(int(condition_number))
-        snr_per_condition.append(float(snr_mean))
+        # -------- NEW: storage for saving overlaps/eigs per condition --------
+        # overlaps_per_condition = []  # list of np.ndarray, each shape ~ (num_angles, num_evec)
+        # eigs_per_condition = []      # list of np.ndarray, each shape ~ (num_angles, num_evec)
+        # angles_per_condition = []    # list of ints, the condition_number (i.e., #angles)
+        # snr_per_condition = []       # list of floats
 
-        SNR_OUTPUTS[idx] = snr_mean
+        # SNR_OUTPUTS = np.zeros((len(array_conditions)))
 
+        # Sample & compute per requested condition grid
+        for idx, condition_number in enumerate(array_conditions):
+            with numpyro.handlers.seed(rng_seed=inference_seed):
+                X_TEST_CONDITIONS = jnp.linspace(0, C - 1, condition_number)
+                mu_test_hat, sigma_test_hat, F_test_hat = posterior.sample(X_TEST_CONDITIONS)
+
+            overlaps_super, eigs_super = calculate_overlap(mu_test_hat, sigma_test_hat, cos=False)  # (~angles, ~evec)
+            overlaps_np = np.asarray(overlaps_super)
+            eigs_np = np.asarray(eigs_super)
+
+            # SNR aggregation (as you already do)
+            snr_per_angle = np.nansum(overlaps_np/eigs_np, axis=1)
+            snr_average = np.nanmean(snr_per_angle)
+            # snr_per_angle = np.nanmean(overlaps_np / eigs_np, axis=1)
+            # snr_mean = np.nansum(snr_per_angle)
+
+            # Save into our lists
+            # overlaps_per_condition.append(overlaps_np)
+            # eigs_per_condition.append(eigs_np)
+            # angles_per_condition.append(int(condition_number))
+            snr_all[r,idx] = (float(snr_average))
+
+            # SNR_OUTPUTS[idx] = snr_average
+    snr_per_condition = np.nanmean(snr_all, axis=0)
     # -------- package everything for saving & later reuse --------
     saved_summary = {
         "animal": animal,
         "sf": None if sf is None else int(sf),
         "start": int(start),
         "stop": int(stop),
-        "N": int(N),
+        # "N": int(N),
         "C": int(C),
-        "array_conditions": [int(c) for c in array_conditions],
-        "overlaps_per_condition": overlaps_per_condition,   # list of arrays
-        "eigs_per_condition": eigs_per_condition,           # list of arrays
+        # "array_conditions": [int(c) for c in array_conditions],
+        # "overlaps_per_condition": overlaps_per_condition,   # list of arrays
+        # "eigs_per_condition": eigs_per_condition,           # list of arrays
         "snr_per_condition": snr_per_condition,             # list of floats
         "hyperparams": dict(hyperparams),                   # record what was used
     }
@@ -292,26 +300,26 @@ def analysis(animal, sf, start, stop, array_conditions,
         with open(out_path, "wb") as f:
             pickle.dump(saved_summary, f, protocol=pickle.HIGHEST_PROTOCOL)
 
-    return SNR_OUTPUTS, saved_summary
 
-
-conditions_array = [12 , 72]
-SAVE_DIR = "saved_overlap_eigs"  # create this folder if it doesn't exist
-
+conditions_array = [8, 12, 18, 24, 36, 45, 48, 60, 72, 120, 180, 360,720]
+number_neurons = []
+for i in range(14):
+    x =resort_preprocessing(SATED_DECONV, SATED_ANGLE, SATED_SF, i)
+    number_neurons.append(x.shape[0])
+MIN_NEURONS = min(number_neurons)
+SAVE_DIR = "saved_overlap_eigs_normal_2509_smaller_sf_sum_remove_new"  # create this folder if it doesn't exist
 # FULL FR
-snr_outputs_mean_fr_full = np.zeros((len(FOOD_RESTRICTED_SATED), 5, len(conditions_array)))
+# snr_outputs_mean_fr_full = np.zeros((len(FOOD_RESTRICTED_SATED), len(conditions_array)))
 for i, animal in enumerate(FOOD_RESTRICTED_SATED):
-    for sf in range(5):
-        snr_outputs_mean_fr_full[i, sf, :], _ = analysis(
-            animal, sf=sf, start=40, stop=80, array_conditions=conditions_array,
-            save_dir=SAVE_DIR, fname_prefix="FR"
+    analysis(
+        animal, sf=None, start=40, stop=80, array_conditions=conditions_array,
+        save_dir=SAVE_DIR, fname_prefix="FR"
         )
 
 # FULL CTR
-# snr_outputs_mean_ctr_full = np.zeros((len(CONTROL_SATED), 5, len(conditions_array)))
-# for i, animal in enumerate(CONTROL_SATED):
-#     for sf in range(2):
-#         snr_outputs_mean_ctr_full[i, sf, :], _ = analysis(
-#             animal, sf=sf, start=40, stop=80, array_conditions=conditions_array,
-#             save_dir=SAVE_DIR, fname_prefix="CTR"
-#         )
+# snr_outputs_mean_ctr_full = np.zeros((len(CONTROL_SATED), len(conditions_array)))
+for i, animal in enumerate(CONTROL_SATED):
+    analysis(
+        animal, sf=None, start=40, stop=80, array_conditions=conditions_array,
+        save_dir=SAVE_DIR, fname_prefix="CTR"
+    )

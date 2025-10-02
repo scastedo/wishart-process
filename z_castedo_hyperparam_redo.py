@@ -86,8 +86,20 @@ def make_evaluator(N, period, x_tr, y_tr, x_te, y_te,
             kernel      = K_wp,
             P           =  int(hyper["p"]) ,
             V           = V_scale * jnp.eye(N),
-            optimize_L  = False,               # as before
+            optimize_L  = True,               # as before
         )
+
+        K, C, N = y_tr.shape
+
+        y_flat = y_tr.reshape(K*C, N)
+        y_flat = y_flat - y_flat.mean(0, keepdims=True)
+        Sigma_bar = (y_flat.T @ y_flat) / (y_flat.shape[0] - 1)
+
+        # Numerically robust chol
+        eps = 1e-3 * jnp.trace(Sigma_bar) / N
+        L0  = jnp.linalg.cholesky(Sigma_bar + eps * jnp.eye(N))
+        wp.L = L0
+
         lik = models.NormalConditionalLikelihood(N)
         joint = models.JointGaussianWishartProcess(gp, wp, lik)
 
@@ -300,7 +312,7 @@ if __name__ == "__main__":
     ndraws = 500
     steps = 3000
     base_seed = 0
-    out_dir = "hp_runs/sated"  # change if you want a different directory
+    out_dir = "hp_runs_LRD_TEST/sated"  # change if you want a different directory
 
     for animal in tqdm(sorted(ALL_ANIMALS), desc="animals"):
         analyse(animal=animal, seed=base_seed, n_draws=ndraws, steps=steps, out_dir=out_dir)
