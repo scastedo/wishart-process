@@ -24,7 +24,7 @@ SATED_DECONV = np.load('../Data/predictions_fullTrace_sated.npy', allow_pickle=T
 
 
 FOOD_RESTRICTED_SATED = [1,2,3,6,7,8,11,12]
-CONTROL_SATED         = [0,4,5,9,10,13]
+CONTROL_SATED         = [0,4,5,9,10,13]  # 5 remove later?
 
 # AngStim_data = '../../Data/metadata_deconv/stimAngle_sated.mat'
 AngStim_data = '../Data/metadata_deconv/stimAngle_sated.mat'
@@ -115,7 +115,7 @@ def remove_neurons(datum, angles,sfs, animal, count = False):
 
     return data_filtered
 
-def calculate_overlap(mu_hat, sigma_hat, cos = False):
+def calculate_delta_mu(mu_hat, sigma_hat, cos = False):
     num_angles = mu_hat.shape[0]
     num_evec = sigma_hat.shape[1]
     overlaps = np.zeros((num_angles, num_evec))
@@ -180,9 +180,9 @@ def analysis(animal, sf, start, stop, array_conditions,
         TEST_DATA = resort_preprocessing(SATED_DECONV, SATED_ANGLE, SATED_SF, animal)[:, :, :, :, start:stop]
         best_test = np.zeros((TEST_DATA.shape[0], TEST_DATA.shape[1], TEST_DATA.shape[3], TEST_DATA.shape[4]))
         for i in range(TEST_DATA.shape[0]):
-            for j in range(TEST_DATA.shape[1]):
-                best_sf = np.argmax(jnp.nanmean(TEST_DATA[i, j, :, :, :], axis=(1, 2))).astype('int')
-                best_test[i, j, :, :] = TEST_DATA[i, j, best_sf, :, :]
+            # for j in range(TEST_DATA.shape[1]):
+            best_sf = np.argmax(jnp.nanmean(TEST_DATA[i, :, :, :, :], axis=(0, 2, 3))).astype('int')
+            best_test[i, :, :, :] = TEST_DATA[i, :, best_sf, :, :]
         TEST_RESPONSE = jnp.nanmean(best_test, axis=-1)  # Shape N x C x K
     else:
         TEST_DATA = resort_preprocessing(SATED_DECONV, SATED_ANGLE, SATED_SF, animal)[:, :, sf, :, start:stop]
@@ -201,7 +201,6 @@ def analysis(animal, sf, start, stop, array_conditions,
     X_CONDITIONS_ALL = jnp.linspace(0, C - 1, C)
     best_hp, best_ll = load_best_hp(animal, "hp_runs/sated")
     hyperparams = hp_internal_to_user(best_hp)
-
     
     periodic_kernel_gp = lambda x, y: hyperparams['gamma_gp']*(x == y) + \
         hyperparams['beta_gp']*jnp.exp(-jnp.sin(jnp.pi*jnp.abs(x - y)/PERIOD)**2/(hyperparams['sigma_m']))
@@ -209,71 +208,58 @@ def analysis(animal, sf, start, stop, array_conditions,
     periodic_kernel_wp = lambda x, y: hyperparams['gamma_wp']*(x == y) + \
         hyperparams['beta_wp']*jnp.exp(-jnp.sin(jnp.pi*jnp.abs(x - y)/PERIOD)**2/(hyperparams['sigma_c']))
 
-
-
     num_repeats = 10
-    rng = np.random.default_rng(2)
-    snr_all = np.full((num_repeats, len(array_conditions)), np.nan, dtype=float)
+    snr_all = np.full((len(array_conditions),12, num_repeats), np.nan, dtype=float)  # shape (n_cond, num_repeats)
     for r in range(num_repeats):
         # ---- random subsample of neurons ----
+        rng = np.random.default_rng(2+r)
         idx_random = rng.choice(N_full, MIN_NEURONS, replace=False)
         TR = TEST_RESPONSE_full[idx_random, :, :]          # (MIN x C x K)
         TR = jnp.transpose(TR, (2, 1, 0))           # K x C x N_sub
         N_sub = int(TR.shape[2])
 
-
         gp = models.GaussianProcess(kernel=periodic_kernel_gp, N=N_sub)
-
         # wp = models.WishartProcess(kernel =periodic_kernel_wp,P=hyperparams['p'],V=1e-2*jnp.eye(N), optimize_L=False)
         wp = models.WishartLRDProcess(kernel=periodic_kernel_wp,P=hyperparams['p'],V=1e-1*jnp.eye(N_sub), optimize_L=False)
-
         likelihood = models.NormalConditionalLikelihood(N_sub)
-
         joint = models.JointGaussianWishartProcess(gp, wp, likelihood)
 
-        inference_seed = 2
+        inference_seed = 2+r
         varfam = inference.VariationalNormal(joint.model)
         adam = optim.Adam(1e-1)
         key = jax.random.PRNGKey(inference_seed)
 
-        varfam.infer(adam, X_CONDITIONS_ALL, TR, n_iter=1500, key=key)
+        varfam.infer(adam, X_CONDITIONS_ALL, TR, n_iter=2000, key=key)
         joint.update_params(varfam.posterior)
         
-
+  
         posterior = models.NormalGaussianWishartPosterior(joint, varfam, X_CONDITIONS_ALL)
-
-        # -------- NEW: storage for saving overlaps/eigs per condition --------
-        # overlaps_per_condition = []  # list of np.ndarray, each shape ~ (num_angles, num_evec)
-        # eigs_per_condition = []      # list of np.ndarray, each shape ~ (num_angles, num_evec)
-        # angles_per_condition = []    # list of ints, the condition_number (i.e., #angles)
-        # snr_per_condition = []       # list of floats
-
-        # SNR_OUTPUTS = np.zeros((len(array_conditions)))
+        # Sample from the posterior
+        with numpyro.handlers.seed(rng_seed=inference_seed + 1000*r):
+            mu_orig, sigma_orig, _ = posterior.sample(X_CONDITIONS_ALL)
 
         # Sample & compute per requested condition grid
         for idx, condition_number in enumerate(array_conditions):
-            with numpyro.handlers.seed(rng_seed=inference_seed):
-                X_TEST_CONDITIONS = jnp.linspace(0, C - 1, condition_number)
-                mu_test_hat, sigma_test_hat, F_test_hat = posterior.sample(X_TEST_CONDITIONS)
+            X_TEST_CONDITIONS = jnp.linspace(0, C - 1, condition_number)
+            with numpyro.handlers.seed(rng_seed=inference_seed + 1000*r + 10*idx):
+                mu_test_hat, _, _ = posterior.sample(X_TEST_CONDITIONS)
+            
+            for og_conds in range(12):
+                eigvals, eigvecs = np.linalg.eigh(sigma_orig[og_conds,:,:])
 
-            overlaps_super, eigs_super = calculate_overlap(mu_test_hat, sigma_test_hat, cos=False)  # (~angles, ~evec)
-            overlaps_np = np.asarray(overlaps_super)
-            eigs_np = np.asarray(eigs_super)
-
-            # SNR aggregation (as you already do)
-            snr_per_angle = np.nansum(overlaps_np/eigs_np, axis=1)
-            snr_average = np.nanmean(snr_per_angle)
-            # snr_per_angle = np.nanmean(overlaps_np / eigs_np, axis=1)
-            # snr_mean = np.nansum(snr_per_angle)
-
-            # Save into our lists
-            # overlaps_per_condition.append(overlaps_np)
-            # eigs_per_condition.append(eigs_np)
-            # angles_per_condition.append(int(condition_number))
-            snr_all[r,idx] = (float(snr_average))
-
-            # SNR_OUTPUTS[idx] = snr_average
-    snr_per_condition = np.nanmean(snr_all, axis=0)
+                # find Delta Mu for each og_cond
+                number_angles,number_evals = mu_test_hat.shape
+                equivalent_cond = int((og_conds * condition_number) // C)
+                d_mu1 = mu_orig[og_conds,:] - mu_test_hat[(equivalent_cond+1)%number_angles,:]
+                d_mu2 = mu_orig[og_conds,:] - mu_test_hat[(equivalent_cond-1)%number_angles,:]
+                d_mu = d_mu1 if np.linalg.norm(d_mu1) < np.linalg.norm(d_mu2) else d_mu2        # choose signal vector with the smallest norm
+                overlap_per_angle = np.zeros((number_evals))
+                
+                for evallss in range(number_evals):
+                    overlap_per_angle[evallss] = np.power((np.dot(d_mu, eigvecs[:,evallss])),2)
+                snr_angle = np.nansum(overlap_per_angle/eigvals)
+                snr_all[idx,og_conds,r] =snr_angle
+    snr_per_condition = np.nanmean(snr_all, axis=(2))
     # -------- package everything for saving & later reuse --------
     saved_summary = {
         "animal": animal,
@@ -301,13 +287,13 @@ def analysis(animal, sf, start, stop, array_conditions,
             pickle.dump(saved_summary, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-conditions_array = [8, 12, 18, 24, 36, 45, 48, 60, 72, 120, 180, 360,720]
+conditions_array = [12, 24, 36, 48, 60, 72, 96, 120, 144, 180, 240, 360]
 number_neurons = []
 for i in range(14):
     x =resort_preprocessing(SATED_DECONV, SATED_ANGLE, SATED_SF, i)
     number_neurons.append(x.shape[0])
 MIN_NEURONS = min(number_neurons)
-SAVE_DIR = "saved_overlap_eigs_normal_2509_smaller_sf_sum_remove_new"  # create this folder if it doesn't exist
+SAVE_DIR = "saved_overlap_eigs_normal_0210_fixed_2"  # create this folder if it doesn't exist
 # FULL FR
 # snr_outputs_mean_fr_full = np.zeros((len(FOOD_RESTRICTED_SATED), len(conditions_array)))
 for i, animal in enumerate(FOOD_RESTRICTED_SATED):
