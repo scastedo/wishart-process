@@ -114,24 +114,6 @@ def remove_neurons(datum, angles,sfs, animal, count = False):
         return data_filtered.shape[0]/data.shape[0]
 
     return data_filtered
-
-def compute_signal_vectors(response, t0=40, t1=80):
-    """
-    Compute Δμ for each ROI, SF, and pair of angles.
-    response: (n_rois, n_angles, n_sfs, n_trials, n_time)
-    Returns:
-      Δμ: (n_rois, n_angles, n_angles, n_sfs)
-    """
-    # average over the chosen time window
-    resp = np.nanmean(response[..., t0:t1], axis=-1)  # → (n_rois, n_angles, n_sfs, n_trials)
-    # average over trials
-    mean_resp = np.nanmean(resp, axis=-1)             # → (n_rois, n_angles, n_sfs)
-    # subtract pairwise to get Δμ[:, i, j, sf]
-    dm = mean_resp[:, :, np.newaxis, :] - mean_resp[:, np.newaxis, :, :]
-    
-    # give a random normalised vector  of shape dm
-    # dm = np.random.randn(*dm.shape)  # random normalised vector
-    return dm  # shape (n_rois, n_angles, n_angles, n_sfs)
 def load_best_hp(animal, out_dir):
     """Return (best_hp: dict, best_ll: float) for this animal."""
     json_path = os.path.join(out_dir, f"animal_{animal:02d}.json")
@@ -184,7 +166,6 @@ def analysis(animal, sf, start, stop, array_conditions,
     else:
         TEST_DATA = resort_preprocessing(SATED_DECONV, SATED_ANGLE, SATED_SF, animal)[:, :, sf, :, start:stop]
         TEST_RESPONSE = jnp.nanmean(TEST_DATA, axis=-1)  # Shape N x C x K
-
 
     good_trials = ~jnp.isnan(TEST_RESPONSE).any(axis=(0, 1))   # shape (K,)
     # nan_mask = jnp.isnan(TEST_RESPONSE)     # (N, C, K)
