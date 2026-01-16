@@ -180,9 +180,9 @@ def analysis(animal, sf, start, stop, array_conditions,
         TEST_DATA = resort_preprocessing(SATED_DECONV, SATED_ANGLE, SATED_SF, animal)[:, :, :, :, start:stop]
         best_test = np.zeros((TEST_DATA.shape[0], TEST_DATA.shape[1], TEST_DATA.shape[3], TEST_DATA.shape[4]))
         for i in range(TEST_DATA.shape[0]):
-            for j in range(TEST_DATA.shape[1]):
-                best_sf = np.argmax(jnp.nanmean(TEST_DATA[i, j, :, :, :], axis=(1, 2))).astype('int')
-                best_test[i, j, :, :] = TEST_DATA[i, j, best_sf, :, :]
+            # for j in range(TEST_DATA.shape[1]):
+            best_sf = np.argmax(jnp.nanmean(TEST_DATA[i, :, :, :, :], axis=(0, 2, 3))).astype('int')
+            best_test[i, :, :, :] = TEST_DATA[i, :, best_sf, :, :]
         TEST_RESPONSE = jnp.nanmean(best_test, axis=-1)  # Shape N x C x K
     else:
         TEST_DATA = resort_preprocessing(SATED_DECONV, SATED_ANGLE, SATED_SF, animal)[:, :, sf, :, start:stop]
