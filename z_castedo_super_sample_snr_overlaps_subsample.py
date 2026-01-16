@@ -92,14 +92,14 @@ def remove_neurons(datum, angles,sfs, animal, count = False):
     number_neurons = data.shape[0]    
     for i in range(number_neurons):
         # print(np.nanmean(data[i, :, :, :, 40:80], axis = 3))
-        stim_average = np.mean(data[i, :, :, :, 40:80], axis = 3) # OKAY TO NOT HAVE NANMEAN?
+        stim_average = np.nanmean(data[i, :, :, :, 40:80], axis = 3) # OKAY TO NOT HAVE NANMEAN?
         best_sf = np.argmax(np.nanmean(stim_average, axis = (0,2))).astype('int')
         best_angle = np.argmax(np.nanmean(stim_average[:,best_sf,:], axis = 1)).astype('int')
         averaged_calcium = np.nanmean(stim_average[best_angle,best_sf,:])
         
         grey_data = data[i, :, :, :, 0:20]
         # grey_data = np.concatenate((data[i, :, :, :, 0:40], data[i, :, :, :, 80:]), axis = 3)
-        grey_average = np.mean(grey_data, axis = 3)
+        grey_average = np.nanmean(grey_data, axis = 3)
         best_sf = np.argmax(np.nanmean(grey_average, axis = (0,2))).astype(int)
         best_angle = np.argmax(np.nanmean(grey_average[:,best_sf,:], axis = 1)).astype(int)
         average_grey = np.nanmean(grey_average[best_angle,best_sf,:])
@@ -115,26 +115,23 @@ def remove_neurons(datum, angles,sfs, animal, count = False):
 
     return data_filtered
 
-def calculate_delta_mu(mu_hat, sigma_hat, cos = False):
-    num_angles = mu_hat.shape[0]
-    num_evec = sigma_hat.shape[1]
-    overlaps = np.zeros((num_angles, num_evec))
-    eig_vals = np.zeros((num_angles, num_evec))
-    for i in range(num_angles):
-        eval, evec = np.linalg.eigh(sigma_hat[i,:,:])
-        evec = evec[:,::-1]  # Sort eigenvectors by eigenvalues in descending order
-        eval = eval[::-1]  # Sort eigenvalues in descending order
-        eig_vals[i,:] = eval
-        d_mu1 = mu_hat[i,:] - mu_hat[(i+1)%num_angles,:]
-        d_mu2 = mu_hat[i,:] - mu_hat[(i-1)%num_angles,:]
-        d_mu = d_mu1 if np.linalg.norm(d_mu1) < np.linalg.norm(d_mu2) else d_mu2        # choose signal vector with the smallest norm
-        for j in range(num_evec):
-            if cos:
-                distance = np.power((np.dot(d_mu, evec[:,j])/ (np.linalg.norm(d_mu))),2)
-            else:
-                distance = np.power((np.dot(d_mu, evec[:,j])),2)
-            overlaps[i,j] = distance
-    return overlaps, eig_vals
+def compute_signal_vectors(response, t0=40, t1=80):
+    """
+    Compute Δμ for each ROI, SF, and pair of angles.
+    response: (n_rois, n_angles, n_sfs, n_trials, n_time)
+    Returns:
+      Δμ: (n_rois, n_angles, n_angles, n_sfs)
+    """
+    # average over the chosen time window
+    resp = np.nanmean(response[..., t0:t1], axis=-1)  # → (n_rois, n_angles, n_sfs, n_trials)
+    # average over trials
+    mean_resp = np.nanmean(resp, axis=-1)             # → (n_rois, n_angles, n_sfs)
+    # subtract pairwise to get Δμ[:, i, j, sf]
+    dm = mean_resp[:, :, np.newaxis, :] - mean_resp[:, np.newaxis, :, :]
+    
+    # give a random normalised vector  of shape dm
+    # dm = np.random.randn(*dm.shape)  # random normalised vector
+    return dm  # shape (n_rois, n_angles, n_angles, n_sfs)
 def load_best_hp(animal, out_dir):
     """Return (best_hp: dict, best_ll: float) for this animal."""
     json_path = os.path.join(out_dir, f"animal_{animal:02d}.json")
@@ -181,7 +178,7 @@ def analysis(animal, sf, start, stop, array_conditions,
         best_test = np.zeros((TEST_DATA.shape[0], TEST_DATA.shape[1], TEST_DATA.shape[3], TEST_DATA.shape[4]))
         for i in range(TEST_DATA.shape[0]):
             # for j in range(TEST_DATA.shape[1]):
-            best_sf = np.argmax(jnp.nanmean(TEST_DATA[i, :, :, :, :], axis=(0, 2, 3))).astype('int')
+            best_sf = np.argmax(jnp.nanmean(TEST_DATA[i, :, :, :, 40:80], axis=(0, 2, 3))).astype('int')
             best_test[i, :, :, :] = TEST_DATA[i, :, best_sf, :, :]
         TEST_RESPONSE = jnp.nanmean(best_test, axis=-1)  # Shape N x C x K
     else:
@@ -208,15 +205,22 @@ def analysis(animal, sf, start, stop, array_conditions,
     periodic_kernel_wp = lambda x, y: hyperparams['gamma_wp']*(x == y) + \
         hyperparams['beta_wp']*jnp.exp(-jnp.sin(jnp.pi*jnp.abs(x - y)/PERIOD)**2/(hyperparams['sigma_c']))
 
-    num_repeats = 10
-    snr_all = np.full((len(array_conditions),12, num_repeats), np.nan, dtype=float)  # shape (n_cond, num_repeats)
+    num_repeats = REPEATS
+    overlaps_all= []
+    eigs_all = []
     for r in range(num_repeats):
         # ---- random subsample of neurons ----
-        rng = np.random.default_rng(2+r)
-        idx_random = rng.choice(N_full, MIN_NEURONS, replace=False)
-        TR = TEST_RESPONSE_full[idx_random, :, :]          # (MIN x C x K)
-        TR = jnp.transpose(TR, (2, 1, 0))           # K x C x N_sub
-        N_sub = int(TR.shape[2])
+        if num_repeats>1:
+            rng = np.random.default_rng(2+r)
+            idx_random = rng.choice(N_full, MIN_NEURONS, replace=False)
+            TR = TEST_RESPONSE_full[idx_random, :, :]          # (MIN x C x K)
+            TR = jnp.transpose(TR, (2, 1, 0))           # K x C x N_sub
+            N_sub = int(TR.shape[2])
+            modes = N_sub
+        else:
+            TR = TEST_RESPONSE_full
+            N_sub = N_full
+            modes = N_sub
 
         gp = models.GaussianProcess(kernel=periodic_kernel_gp, N=N_sub)
         # wp = models.WishartProcess(kernel =periodic_kernel_wp,P=hyperparams['p'],V=1e-2*jnp.eye(N), optimize_L=False)
@@ -235,31 +239,71 @@ def analysis(animal, sf, start, stop, array_conditions,
   
         posterior = models.NormalGaussianWishartPosterior(joint, varfam, X_CONDITIONS_ALL)
         # Sample from the posterior
-        with numpyro.handlers.seed(rng_seed=inference_seed + 1000*r):
-            mu_orig, sigma_orig, _ = posterior.sample(X_CONDITIONS_ALL)
+        
+        
+        # with numpyro.handlers.seed(rng_seed=inference_seed + 1000*r):
+        #     mu_orig, sigma_orig, _ = posterior.sample(X_CONDITIONS_ALL)
+
+
+        n_draws = 50
+        mu_draws = []
+        sig_draws = []
+
+        for d in range(n_draws):
+            with numpyro.handlers.seed(rng_seed=inference_seed + 1000*r + 17*d):
+                mu_d, sigma_d, _ = posterior.sample(X_CONDITIONS_ALL)  # (C,N), (C,N,N)
+            mu_draws.append(np.array(mu_d))
+            sig_draws.append(np.array(sigma_d))
+
+        mu_orig = np.mean(mu_draws, axis=0)       # (C, N_sub)
+        sigma_orig = np.mean(sig_draws, axis=0)   # (C, N_sub, N_sub)    
+
+
+
+
+
+        overlaps_list = []
+        eigs_list = []     
 
         # Sample & compute per requested condition grid
         for idx, condition_number in enumerate(array_conditions):
             X_TEST_CONDITIONS = jnp.linspace(0, C - 1, condition_number)
-            with numpyro.handlers.seed(rng_seed=inference_seed + 1000*r + 10*idx):
-                mu_test_hat, _, _ = posterior.sample(X_TEST_CONDITIONS)
             
+            
+            
+            # with numpyro.handlers.seed(rng_seed=inference_seed + 1000*r + 10*idx):
+            #     mu_test_hat, _, _ = posterior.sample(X_TEST_CONDITIONS)
+
+            n_draws = 50
+            mu_draws = []
+            for d in range(n_draws):
+                with numpyro.handlers.seed(rng_seed=inference_seed + 1000*r + 10*idx+ 17*d):
+                    mu_d, _, _ = posterior.sample(X_TEST_CONDITIONS)  # (C,N), (C,N,N)
+                mu_draws.append(np.array(mu_d))
+            mu_test_hat = np.mean(mu_draws, axis=0)       # (C, N_sub)
+
+            overlaps_array = np.full((12, modes), np.nan)
+            eigs_array = np.full((12, modes), np.nan)
             for og_conds in range(12):
                 eigvals, eigvecs = np.linalg.eigh(sigma_orig[og_conds,:,:])
+                eigval_order = np.argsort(eigvals)[::-1]
+                eigvals = eigvals[eigval_order] 
+                eigvecs = eigvecs[:,eigval_order] 
+                eigs_array[og_conds,:] = eigvals[:modes] # could also be the last modes
 
                 # find Delta Mu for each og_cond
                 number_angles,number_evals = mu_test_hat.shape
                 equivalent_cond = int((og_conds * condition_number) // C)
-                d_mu1 = mu_orig[og_conds,:] - mu_test_hat[(equivalent_cond+1)%number_angles,:]
-                d_mu2 = mu_orig[og_conds,:] - mu_test_hat[(equivalent_cond-1)%number_angles,:]
-                d_mu = d_mu1 if np.linalg.norm(d_mu1) < np.linalg.norm(d_mu2) else d_mu2        # choose signal vector with the smallest norm
-                overlap_per_angle = np.zeros((number_evals))
+                d_mu = mu_orig[og_conds,:] - mu_test_hat[(equivalent_cond+1)%number_angles,:]
                 
-                for evallss in range(number_evals):
-                    overlap_per_angle[evallss] = np.power((np.dot(d_mu, eigvecs[:,evallss])),2)
-                snr_angle = np.nansum(overlap_per_angle/eigvals)
-                snr_all[idx,og_conds,r] =snr_angle
-    snr_per_condition = np.nanmean(snr_all, axis=(2))
+                for evallss in range(modes): # could also be the last modes
+                    overlap = np.power((np.dot(d_mu, eigvecs[:,evallss])),2)/np.power(np.linalg.norm(d_mu)*np.linalg.norm(eigvecs[:,evallss]),2)
+                    overlaps_array[og_conds,evallss] = overlap 
+                    # overlaps_array[og_conds,evallss] = np.power((np.dot(d_mu, eigvecs[:,evallss])),2)
+            overlaps_list.append(overlaps_array)
+            eigs_list.append(eigs_array)
+        overlaps_all.append(overlaps_list)
+        eigs_all.append(eigs_list)
     # -------- package everything for saving & later reuse --------
     saved_summary = {
         "animal": animal,
@@ -268,10 +312,9 @@ def analysis(animal, sf, start, stop, array_conditions,
         "stop": int(stop),
         # "N": int(N),
         "C": int(C),
-        # "array_conditions": [int(c) for c in array_conditions],
-        # "overlaps_per_condition": overlaps_per_condition,   # list of arrays
-        # "eigs_per_condition": eigs_per_condition,           # list of arrays
-        "snr_per_condition": snr_per_condition,             # list of floats
+        "array_conditions": [int(c) for c in array_conditions],
+        "overlaps_per_condition": overlaps_all,   # list of arrays
+        "eigs_per_condition": eigs_all,           # list of arrays
         "hyperparams": dict(hyperparams),                   # record what was used
     }
     saved_summary["hyperparams"] = dict(hyperparams)
@@ -287,25 +330,48 @@ def analysis(animal, sf, start, stop, array_conditions,
             pickle.dump(saved_summary, f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
-conditions_array = [12, 24, 36, 48, 60, 72, 96, 120, 144, 180, 240, 360]
+conditions_array = [12,36]
 number_neurons = []
 for i in range(14):
     x =resort_preprocessing(SATED_DECONV, SATED_ANGLE, SATED_SF, i)
     number_neurons.append(x.shape[0])
+
+
+
+#DO wE DO ALL SFs OR BEST SF ONLY?
+#Do we do subsampling or not (top or bottom 50 neurons)
+
 MIN_NEURONS = min(number_neurons)
-SAVE_DIR = "saved_overlap_eigs_normal_0210_fixed_2"  # create this folder if it doesn't exist
+REPEATS = 50
+SAVE_DIR = "figure_creation_jan_15_subsampled_all_sf_cos"  # create this folder if it doesn't exist
 # FULL FR
 # snr_outputs_mean_fr_full = np.zeros((len(FOOD_RESTRICTED_SATED), len(conditions_array)))
+# for i, animal in enumerate(FOOD_RESTRICTED_SATED):
+#     analysis(
+#         animal, sf=None, start=40, stop=80, array_conditions=conditions_array,
+#         save_dir=SAVE_DIR, fname_prefix="FR"
+#         )
+
+# # FULL CTR
+# # snr_outputs_mean_ctr_full = np.zeros((len(CONTROL_SATED), len(conditions_array)))
+# for i, animal in enumerate(CONTROL_SATED):
+#     analysis(
+#         animal, sf=None, start=40, stop=80, array_conditions=conditions_array,
+#         save_dir=SAVE_DIR, fname_prefix="CTR"
+#     )
+
+
 for i, animal in enumerate(FOOD_RESTRICTED_SATED):
-    analysis(
-        animal, sf=None, start=40, stop=80, array_conditions=conditions_array,
-        save_dir=SAVE_DIR, fname_prefix="FR"
+    for sf in range(5):
+        analysis(
+            animal, sf=sf, start=40, stop=80, array_conditions=conditions_array,
+            save_dir=SAVE_DIR, fname_prefix="FR"
         )
 
 # FULL CTR
-# snr_outputs_mean_ctr_full = np.zeros((len(CONTROL_SATED), len(conditions_array)))
 for i, animal in enumerate(CONTROL_SATED):
-    analysis(
-        animal, sf=None, start=40, stop=80, array_conditions=conditions_array,
-        save_dir=SAVE_DIR, fname_prefix="CTR"
-    )
+    for sf in range(5):
+        analysis(
+            animal, sf=sf, start=40, stop=80, array_conditions=conditions_array,
+            save_dir=SAVE_DIR, fname_prefix="CTR"
+        )
