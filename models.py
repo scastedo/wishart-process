@@ -37,7 +37,7 @@ class WishartProcess:
         C = x.shape[0]
         L = numpyro.param('L', self.L) if self.optimize_L else self.L
 
-        c_f = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
+        c_f = self.evaluate_kernel(x,x)
 
         F = numpyro.sample(
             'F',dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_f),
@@ -63,8 +63,6 @@ class WishartProcess:
         f = jnp.einsum('ij,mnj->mni',(K_X_x.T@Ki),Y)
         K = K_x_x - K_X_x.T@Ki@K_X_x
         
-        K = K + 1e-6 * jnp.eye(K.shape[-1]) # regularize covariance ADDED BY SEB
-
         F = numpyro.sample(
             'F_test',dist.MultivariateNormal(f,covariance_matrix=K),
             sample_shape=(1,1)
@@ -107,7 +105,7 @@ class WishartProcess:
     def log_prob(self, x, F):
         # TODO: input to this fn must be sigma, not F
         C = x.shape[0]
-        c_f = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
+        c_f = self.evaluate_kernel(x,x)
         LPF = dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_f).log_prob(F)
         return LPF
 
@@ -138,7 +136,7 @@ class WishartLRDProcess:
         C = x.shape[0]
         L = numpyro.param('L', self.L) if self.optimize_L else self.L
 
-        c_f = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
+        c_f = self.evaluate_kernel(x,x)
 
         F = numpyro.sample(
             'F',dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_f),
@@ -163,9 +161,6 @@ class WishartLRDProcess:
         
         f = jnp.einsum('ij,mnj->mni',(K_X_x.T@Ki),Y)
         K = K_x_x - K_X_x.T@Ki@K_X_x
-        # regularize covariance ADDED BY SEB
-        jitter = 1e-6  # ADDED BY SEB
-        K = K + jitter * jnp.eye(K.shape[0], dtype=K.dtype) # ADDED BY SEB
         
         F = numpyro.sample(
             'F_test',dist.MultivariateNormal(f,covariance_matrix=K),
@@ -210,7 +205,7 @@ class WishartLRDProcess:
     def log_prob(self, x, F):
         # TODO: input to this fn must be sigma, not F
         C = x.shape[0]
-        c_f = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
+        c_f = self.evaluate_kernel(x,x)
         LPF = dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_f).log_prob(F)
         return LPF
     
@@ -227,7 +222,7 @@ class GaussianProcess:
 
     def sample(self, x):
         C = x.shape[0]
-        c_g = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
+        c_g = self.evaluate_kernel(x,x)
         G = numpyro.sample(
             'G',dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_g),
             sample_shape=(self.N,1)
@@ -246,9 +241,6 @@ class GaussianProcess:
         f = jnp.einsum('ij,jm->mi',(K_X_x.T@Ki),Y)
         
         K = K_x_x - K_X_x.T@Ki@K_X_x
-        # regularize covariance ADDED BY SEB
-        jitter = 1e-6  # ADDED BY SEB
-        K = K + jitter * jnp.eye(K.shape[0], dtype=K.dtype) # ADDED BY SEB
 
         G_new = numpyro.sample(
             'G_test',dist.MultivariateNormal(f,covariance_matrix=K),
@@ -283,7 +275,7 @@ class GaussianProcess:
     
     def log_prob(self, x, G):
         C = x.shape[0]
-        c_g = self.evaluate_kernel(x,x) + 1e-6 * jnp.eye(C) #ADDED BY SEB
+        c_g = self.evaluate_kernel(x,x)
         LPG = dist.MultivariateNormal(jnp.zeros(C),covariance_matrix=c_g).log_prob(G)
         return LPG
 
@@ -480,43 +472,3 @@ class NormalGaussianWishartPosterior:
         
         LPP = jax.nn.logsumexp(jnp.stack(LPL),axis=0) - jnp.log(vi_samples) - jnp.log(gp_samples)
         return LPP
-    
-
-### 
-# This is a workaround to avoid GPU Memory Errors. This allows for better performance and compatibility
-# with JAX's automatic differentiation and JIT compilation.
-# ADDED BY SEB
-###
-from functools import partial
-
-def make_posterior_derivative(evaluate_kernel, f2sigma):
-    @partial(jax.jit, static_argnums=(3,))
-    def _compute_derivative(X, Y, x_new, batch_size):
-        KXX = evaluate_kernel(X, X)
-        Ki  = jnp.linalg.inv(KXX)
-
-        def single_out(x):
-            KXx = evaluate_kernel(x, X)
-            F   = jnp.einsum('ij,mnj->mni', (KXx.T @ Ki), Y)
-            return f2sigma(F)
-
-        single_jac = jax.jit(jax.jacrev(single_out))
-
-        def process(chunk):
-            return jax.vmap(lambda xx: single_jac(xx[None]))(chunk)
-
-        parts = jnp.array_split(x_new, max(1, x_new.shape[0] // batch_size))
-        return jnp.concatenate([process(p) for p in parts], axis=0)
-
-    return _compute_derivative
-
-# ——— Now the squeezed patch ———
-def _wp_derivative_squeezed(self, X, Y, x_new, batch_size=1):
-    raw = make_posterior_derivative(self.evaluate_kernel, self.f2sigma)(
-        X, Y, x_new, batch_size
-    )
-    # drop *all* singleton dims so (M,1,N,N,1) → (M,N,N)
-    return raw.squeeze()
-
-WishartProcess.posterior_derivative = _wp_derivative_squeezed
-WishartLRDProcess.posterior_derivative = _wp_derivative_squeezed

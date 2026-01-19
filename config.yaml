@@ -1,0 +1,72 @@
+data:
+  npz_path: data_sated_animal_1.npz
+  x_key: x
+  y_key: y
+
+splits:
+  test: {train_condition_prop: 0.8, train_trial_prop: 0.8, seed: 0}
+  val:  {train_condition_prop: 0.8, train_trial_prop: 0.8, seed: 1}
+
+kernels:
+  dims:
+    - name: angle
+      type: periodic
+      period: 12
+
+      # Mean GP: allow 5–10° variation (Δ=0.17–0.33) but still smooth over 30° (Δ=1)
+      gp:
+        gamma:  {dist: loguniform, low: 1e-6, high: 1e-3}
+        beta:   {dist: loguniform, low: 1e-3, high: 5e-1}
+        lambda: {dist: loguniform, low: 2e-2, high: 5e-1}
+
+      # Covariance WP: broader/smoother range is fine (paper-like)
+      wp:
+        gamma:  {dist: loguniform, low: 1e-6, high: 1e-2}
+        beta:   {dist: loguniform, low: 1e-3, high: 1.0}
+        lambda: {dist: loguniform, low: 5e-2, high: 6.4}
+
+    - name: sf
+      type: rbf
+
+      # sf is log2(cpd), adjacent levels differ by 1
+      # lambda ~ 0.3 makes only neighbors correlate; lambda ~ 10 makes all correlate
+      gp:
+        gamma:  {dist: loguniform, low: 1e-6, high: 1e-3}
+        beta:   {dist: loguniform, low: 1e-3, high: 5e-1}
+        lambda: {dist: loguniform, low: 3e-1, high: 1e1}
+
+      wp:
+        gamma:  {dist: loguniform, low: 1e-6, high: 1e-2}
+        beta:   {dist: loguniform, low: 1e-3, high: 1.0}
+        lambda: {dist: loguniform, low: 3e-1, high: 3e1}
+
+model:
+  process: WishartLRDProcess
+  likelihood: NormalConditionalLikelihood
+  optimize_L: true
+  V_scale: 0.1
+  diag_scale: 1.0
+
+search:
+  strategy: random
+  n_samples: 200
+  seed: 0
+  model:
+    P: {values: [0, 1, 2]}
+
+inference:
+  n_iter: 10000
+  step_size: 0.01
+  num_particles: 1
+
+eval:
+  split: conditions
+  n_mc: 32
+  seed: 0
+  run_test: true
+
+analysis:
+  pc_std: 0.1
+  pc_dotsize: 8
+  sf_index: 0        # or sf_value: 2.0
+  eig_top_k: 50
