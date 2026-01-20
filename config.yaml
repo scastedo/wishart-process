@@ -17,7 +17,7 @@ kernels:
       gp:
         gamma:  {dist: loguniform, low: 1e-6, high: 1e-3}
         beta:   {dist: loguniform, low: 1e-3, high: 5e-1}
-        lambda: {dist: loguniform, low: 2e-2, high: 5e-1}
+        lambda: {dist: loguniform, low: 2e-2, high: 5}
 
       # Covariance WP: broader/smoother range is fine (paper-like)
       wp:
@@ -49,13 +49,13 @@ model:
 
 search:
   strategy: random
-  n_samples: 200
+  n_samples: 10
   seed: 0
   model:
     P: {values: [0, 1, 2]}
 
 inference:
-  n_iter: 10000
+  n_iter: 15000
   step_size: 0.01
   num_particles: 1
 
