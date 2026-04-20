@@ -47,7 +47,7 @@ ITERATIONS = 50000
 NUM_PARTICLES = 1
 MC_DRAWS = 50
 
-GAMMA = 1e-6
+GAMMA = 1e-5
 BETA_WP = 1.0
 WP_SAMPLE_DIAG = GAMMA
 OPTIMIZE_L = True
@@ -75,20 +75,20 @@ LAMBDA_GRID = {
 SEARCH_STRATEGY = "random"  # "grid" or "random"
 N_RANDOM_SAMPLES = 50
 LAMBDA_RANGES = {
-    "gp_angle": (0.001, 25.0),
+    "gp_angle": (0.1, 50.0),
     "gp_sf": (0.001, 25.0),
-    "wp_angle": (0.001, 50.0),
-    "wp_sf": (0.001, 25.0),
+    "wp_angle": (5.0, 50.0),
+    "wp_sf": (0.1,10.0),
 }
 LAMBDA_SAMPLE = "uniform"  # or "uniform"
 
-P_VALUES = [0]
+P_VALUES = [0,2,3]
 FULL_GRID_SEARCH = True  # if True, grid search over lambdas x P
 P_FOR_LAMBDA_SWEEP = 0
 LAMBDA_FOR_P_SWEEP = None  # if dict, use those lambdas; if None, use best combo
 
 OUTPUT_DIR = "outputs"
-RESULTS_PATH = "outputs/hyperparam_cv_results_feb_12.json"
+RESULTS_PATH = "outputs/hyperparam_cv_results_feb_17.json"
 
 def estimate_beta_gp(y_train):
     mu = y_train.mean(axis=0)
