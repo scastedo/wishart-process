@@ -265,7 +265,7 @@ def analysis(animal, start, stop, small_angle,repeats,total_k,
         'gamma_gp_sf': GAMMA,
         'beta_gp_sf': BETA_GP,
 
-        'lambda_wp_angle': 0.8,
+        'lambda_wp_angle': 0.5,
         'gamma_wp_angle': GAMMA,
         'beta_wp_angle': 1.,
 
