@@ -136,13 +136,13 @@ def remove_neurons(datum, angles,sfs, animal, count = False):
 #     }
 def compute_noise_metrics_all(
     y_response, covariance_fits, mu_test_hat,
-    total_k, repeats, seed, small_degree):
+    total_k, min_neurons,repeats, seed, small_degree):
     y_response = np.asarray(y_response)
     covariance_fits = np.asarray(covariance_fits)
     mu_test_hat = np.asarray(mu_test_hat)
 
     if total_k is None:
-        kmax = y_response.shape[-1]
+        kmax = min_neurons
     else:
         kmax = total_k
 
@@ -167,9 +167,9 @@ def compute_noise_metrics_all(
 
 
     for r in range(repeats):
-        if total_k is not None and total_k < neurons:
+        if total_k is None:
             rng = np.random.default_rng(seed + r)
-            idx = rng.choice(neurons, total_k, replace=False)
+            idx = rng.choice(neurons, kmax, replace=False)
             sig_vec = signal_vectors[:, :, :, idx]
             resp4_small_r = resp4_small[:, :, idx]
             covariance_repeats = np.take(covariance_results, idx, axis=2)
@@ -217,7 +217,7 @@ def compute_noise_metrics_all(
     }
 
 
-def analysis(animal, start, stop, small_angle,repeats,total_k,
+def analysis(animal, start, stop, small_angle,repeats,total_k,min_neurons,
              save_dir=None, fname_prefix=None):
     """
     Run the full analysis for one animal, including:
@@ -328,7 +328,7 @@ def analysis(animal, start, stop, small_angle,repeats,total_k,
     if mu_test_hat.shape[0] != small_angle * C2:
         mu_test_hat =mu_test_hat.transpose()
 
-    output = compute_noise_metrics_all(mean_orig_mode, sigma_orig_mode, mu_test_hat, total_k, repeats, SEED,small_angle)
+    output = compute_noise_metrics_all(mean_orig_mode, sigma_orig_mode, mu_test_hat, total_k,min_neurons, repeats, SEED,small_angle)
 
    
     # -------- package everything for saving & later reuse --------
@@ -366,17 +366,18 @@ for i in range(14):
     x =resort_preprocessing(SATED_DECONV, SATED_ANGLE, SATED_SF, i)
     number_neurons.append(x.shape[0])
 
-MIN_NEURONS = None# min(number_neurons)  #OR None
+MIN_NEURONS = min(number_neurons)  #OR None
+TOTAL_K = None
 REPEATS = 100
 SAVE_DIR = "wishart_april"  # create this folder if it doesn't exist
 
 for i, animal in enumerate(FOOD_RESTRICTED_SATED):
     analysis(
-        animal,start=40, stop=80, small_angle=small_angle, repeats=REPEATS, total_k=MIN_NEURONS,
+        animal,start=40, stop=80, small_angle=small_angle, repeats=REPEATS, total_k=TOTAL_K,min_neurons=MIN_NEURONS,
         save_dir=SAVE_DIR, fname_prefix="FR"
         )
 for i, animal in enumerate(CONTROL_SATED):
     analysis(
-        animal,  start=40, stop=80, small_angle=small_angle, repeats=REPEATS, total_k=MIN_NEURONS,
+        animal,  start=40, stop=80, small_angle=small_angle, repeats=REPEATS, total_k=TOTAL_K,min_neurons=MIN_NEURONS,
         save_dir=SAVE_DIR, fname_prefix="CTR"
     )
