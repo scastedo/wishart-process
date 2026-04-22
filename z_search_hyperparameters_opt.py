@@ -39,8 +39,8 @@ Y_KEY = "y"
 
 SEED = 10
 NUM_FOLDS = 5
-TRAIN_TRIAL_PROP = 0.8
-TRAIN_CONDITION_PROP = 1.0
+TRAIN_TRIAL_PROP = 1.0
+TRAIN_CONDITION_PROP = 0.8
 
 ADAM_STEP = 0.001
 ITERATIONS = 50000
@@ -51,7 +51,7 @@ GAMMA = 1e-5
 BETA_WP = 1.0
 WP_SAMPLE_DIAG = GAMMA
 OPTIMIZE_L = True
-PERIOD = None  # set to None to infer from x
+PERIOD = 12  # set to None to infer from x
 
 # LAMBDA_GRID = {
 #     "gp_angle": [1.5, 2.0, 2.5],
@@ -75,20 +75,20 @@ LAMBDA_GRID = {
 SEARCH_STRATEGY = "random"  # "grid" or "random"
 N_RANDOM_SAMPLES = 50
 LAMBDA_RANGES = {
-    "gp_angle": (0.1, 50.0),
-    "gp_sf": (0.001, 25.0),
-    "wp_angle": (5.0, 50.0),
-    "wp_sf": (0.1,10.0),
+    "gp_angle": (0.01, 5.0),
+    "gp_sf": (0.01, 5.0),
+    "wp_angle": (0.01, 5.0),
+    "wp_sf": (0.01,5.0),
 }
 LAMBDA_SAMPLE = "uniform"  # or "uniform"
 
-P_VALUES = [0,2,3]
-FULL_GRID_SEARCH = True  # if True, grid search over lambdas x P
+P_VALUES = [0]
+FULL_GRID_SEARCH = False  # if True, grid search over lambdas x P
 P_FOR_LAMBDA_SWEEP = 0
 LAMBDA_FOR_P_SWEEP = None  # if dict, use those lambdas; if None, use best combo
 
 OUTPUT_DIR = "outputs"
-RESULTS_PATH = "outputs/hyperparam_cv_results_feb_17.json"
+RESULTS_PATH = "outputs/hyperparam_cv_results_april_22.json"
 
 def estimate_beta_gp(y_train):
     mu = y_train.mean(axis=0)
@@ -214,16 +214,18 @@ def run_cv_for_params(x_full, y_full, lambdas, p_val, fold_seeds):
             train_condition_prop=TRAIN_CONDITION_PROP,
             seed=fold_seed,
         )
-        x_tr, y_tr, _, _, _, y_te, *_ = split
-        y_test = y_te["x"]
+        x_tr, y_tr, _, _, x_test, y_te, *_ = split
+        # y_test = y_te["x"] Have this instead if we want just trail hold out
+        y_test= y_te["x_test"]
 
         x_tr = jnp.asarray(x_tr)
         y_tr = jnp.asarray(y_tr)
         y_test = jnp.asarray(y_test)
+        x_test = jnp.asarray(x_test)
 
         period = PERIOD
-        if period is None:
-            period = int(np.unique(np.asarray(x_tr)[:, 0]).size)
+        # if period is None:
+        #     period = int(np.unique(np.asarray(x_tr)[:, 0]).size)
 
         beta_gp = estimate_beta_gp(y_tr)
         hyperparams = {
@@ -245,7 +247,7 @@ def run_cv_for_params(x_full, y_full, lambdas, p_val, fold_seeds):
         posterior, lik = fit_posterior(x_tr, y_tr, hyperparams, period, fold_seed)
         ll_stats = mc_log_prob_trials(
             posterior,
-            x_tr,
+            x_test, # change to x_tr if just hold out trials
             y_test,
             vi_samples=MC_DRAWS,
             gp_samples=1,
