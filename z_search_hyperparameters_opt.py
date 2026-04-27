@@ -3,11 +3,11 @@
 """
 Cross-validated hyperparameter sweeps for the GP/Wishart model.
 
-Each run:
-- 5 randomized trial folds (train/test split)
-- sweep four distinct lambdas (gp/wp x angle/sf) and number of components (P)
-- report cross-validated log probability of test trials
-- plot log probability vs smoothness (geometric mean of lambdas) and vs P
+The default run now tests angular mean interpolation:
+- train on alternating angle columns across all spatial frequencies
+- hold out the interleaved angle columns
+- sweep GP mean smoothness while keeping the WP covariance smoothness fixed
+- score held-out empirical means, with simple interpolation baselines
 """
 import os
 
@@ -39,8 +39,10 @@ Y_KEY = "y"
 
 SEED = 10
 NUM_FOLDS = 5
+NUM_ANGLE_PARITY_FOLDS = 2
 TRAIN_TRIAL_PROP = 1.0
 TRAIN_CONDITION_PROP = 0.8
+EVAL_MODE = "mean_angle_interpolation"  # or "posterior_predictive_log_prob"
 
 ADAM_STEP = 0.001
 ITERATIONS = 50000
@@ -53,26 +55,14 @@ WP_SAMPLE_DIAG = GAMMA
 OPTIMIZE_L = True
 PERIOD = 12  # set to None to infer from x
 
-# LAMBDA_GRID = {
-#     "gp_angle": [1.5, 2.0, 2.5],
-#     "gp_sf": [1.0, 3.0, 6.0],
-#     "wp_angle": [0.25, 0.5, 1.0, 3.0],
-#     "wp_sf": [1.0, 1.5],
-# }
 LAMBDA_GRID = {
-    "gp_angle": [1.8],
-    "gp_sf":    [3.0, 6.0, 12.0, 20.0,25.0],
-    "wp_angle": [0.5,1.0, 3.0, 5.0,10.0],
-    "wp_sf":    [12.0, 20.0,25.0],
+    "gp_angle": [0.25, 0.5, 1.0, 1.8, 3.0, 5.0, 8.0, 12.0],
+    "gp_sf": [0.5, 1.0, 2.0, 4.0, 8.0, 12.0],
+    "wp_angle": [4.137248645753729],
+    "wp_sf": [4.667857969549391],
 }
-# LAMBDA_GRID = {
-#     "gp_angle": [1.8],
-#     "gp_sf":    [3.0, 6.0, 12.0, 20.0,25.0],
-#     "wp_angle": [0.5,1.0, 3.0, 5.0,10.0],
-#     "wp_sf":    [1.0, 1.5, 6.0],
-# }
 
-SEARCH_STRATEGY = "random"  # "grid" or "random"
+SEARCH_STRATEGY = "grid"  # "grid" or "random"
 N_RANDOM_SAMPLES = 50
 LAMBDA_RANGES = {
     "gp_angle": (0.01, 5.0),
@@ -88,7 +78,7 @@ P_FOR_LAMBDA_SWEEP = 0
 LAMBDA_FOR_P_SWEEP = None  # if dict, use those lambdas; if None, use best combo
 
 OUTPUT_DIR = "outputs"
-RESULTS_PATH = "outputs/hyperparam_cv_results_april_22.json"
+RESULTS_PATH = "outputs/mean_interp_angle_cv_april_27_gonz.json"
 
 def estimate_beta_gp(y_train):
     mu = y_train.mean(axis=0)
@@ -204,69 +194,238 @@ def iter_lambda_combos(grid):
         yield dict(zip(keys, combo))
 
 
-def run_cv_for_params(x_full, y_full, lambdas, p_val, fold_seeds):
+def make_hyperparams(lambdas, p_val, beta_gp):
+    return {
+        "gamma_gp_angle": GAMMA,
+        "beta_gp_angle": beta_gp,
+        "lambda_gp_angle": float(lambdas["gp_angle"]),
+        "gamma_gp_sf": GAMMA,
+        "beta_gp_sf": beta_gp,
+        "lambda_gp_sf": float(lambdas["gp_sf"]),
+        "gamma_wp_angle": GAMMA,
+        "beta_wp_angle": BETA_WP,
+        "lambda_wp_angle": float(lambdas["wp_angle"]),
+        "gamma_wp_sf": GAMMA,
+        "beta_wp_sf": BETA_WP,
+        "lambda_wp_sf": float(lambdas["wp_sf"]),
+        "p": int(p_val),
+    }
+
+
+def split_angle_parity(x_full, y_full, fold_id):
+    x_np = np.asarray(x_full)
+    unique_angles = np.sort(np.unique(x_np[:, 0]))
+    train_angles = unique_angles[int(fold_id)::NUM_ANGLE_PARITY_FOLDS]
+
+    train_mask = np.isin(x_np[:, 0], train_angles)
+    test_mask = ~train_mask
+    test_angles = unique_angles[~np.isin(unique_angles, train_angles)]
+
+    return (
+        x_full[train_mask],
+        y_full[:, train_mask, :],
+        x_full[test_mask],
+        y_full[:, test_mask, :],
+        train_angles,
+        test_angles,
+    )
+
+
+def align_mean_shape(mu_hat, mu_true):
+    mu_hat = jnp.asarray(mu_hat)
+    if mu_hat.shape == mu_true.shape:
+        return mu_hat
+    if mu_hat.T.shape == mu_true.shape:
+        return mu_hat.T
+    raise ValueError(f"Predicted mean shape {mu_hat.shape} does not match target {mu_true.shape}.")
+
+
+def circular_angle_distance(a, b, period):
+    diff = np.abs(a - b)
+    return np.minimum(diff, period - diff)
+
+
+def nearest_angle_baseline(x_train, y_train, x_eval, period):
+    x_train_np = np.asarray(x_train)
+    x_eval_np = np.asarray(x_eval)
+    mu_train = np.asarray(y_train).mean(axis=0)
+
+    preds = []
+    for x_row in x_eval_np:
+        same_sf = np.isclose(x_train_np[:, 1], x_row[1])
+        candidates = np.where(same_sf)[0]
+        if candidates.size == 0:
+            candidates = np.arange(x_train_np.shape[0])
+
+        distances = circular_angle_distance(x_train_np[candidates, 0], x_row[0], period)
+        nearest = candidates[np.isclose(distances, distances.min())]
+        preds.append(mu_train[nearest].mean(axis=0))
+
+    return jnp.asarray(np.stack(preds, axis=0))
+
+
+def circular_linear_angle_baseline(x_train, y_train, x_eval, period):
+    x_train_np = np.asarray(x_train)
+    x_eval_np = np.asarray(x_eval)
+    mu_train = np.asarray(y_train).mean(axis=0)
+
+    preds = []
+    for x_row in x_eval_np:
+        same_sf = np.isclose(x_train_np[:, 1], x_row[1])
+        candidates = np.where(same_sf)[0]
+        if candidates.size == 0:
+            candidates = np.arange(x_train_np.shape[0])
+
+        angles = x_train_np[candidates, 0]
+        forward_from_candidate = (x_row[0] - angles) % period
+        forward_to_candidate = (angles - x_row[0]) % period
+
+        prev_idx = candidates[np.argmin(forward_from_candidate)]
+        next_idx = candidates[np.argmin(forward_to_candidate)]
+        prev_dist = float(np.min(forward_from_candidate))
+        next_dist = float(np.min(forward_to_candidate))
+        denom = prev_dist + next_dist
+
+        if denom == 0:
+            pred = mu_train[prev_idx]
+        else:
+            pred = (next_dist / denom) * mu_train[prev_idx] + (prev_dist / denom) * mu_train[next_idx]
+        preds.append(pred)
+
+    return jnp.asarray(np.stack(preds, axis=0))
+
+
+def prediction_metrics(mu_hat, mu_true, y_eval):
+    mu_hat = align_mean_shape(mu_hat, mu_true)
+    err = mu_hat - mu_true
+    mse = jnp.mean(err ** 2)
+
+    trial_var = jnp.var(jnp.asarray(y_eval), axis=0)
+    sem_var = trial_var / max(y_eval.shape[0], 1)
+    noise_norm_mse = jnp.mean((err ** 2) / (sem_var + 1e-8))
+
+    a = mu_hat.reshape(-1) - mu_hat.mean()
+    b = mu_true.reshape(-1) - mu_true.mean()
+    corr = jnp.sum(a * b) / (jnp.sqrt(jnp.sum(a ** 2) * jnp.sum(b ** 2)) + 1e-8)
+
+    return {
+        "mse": float(mse),
+        "rmse": float(jnp.sqrt(mse)),
+        "noise_norm_mse": float(noise_norm_mse),
+        "corr": float(corr),
+    }
+
+
+def mean_interp_score(posterior, x_train, y_train, x_eval, y_eval, period):
+    mu_true = jnp.asarray(y_eval).mean(axis=0)
+    mu_hat, _, _ = posterior.mode(jnp.asarray(x_eval))
+
+    model_metrics = prediction_metrics(mu_hat, mu_true, y_eval)
+    nearest_metrics = prediction_metrics(
+        nearest_angle_baseline(x_train, y_train, x_eval, period),
+        mu_true,
+        y_eval,
+    )
+    linear_metrics = prediction_metrics(
+        circular_linear_angle_baseline(x_train, y_train, x_eval, period),
+        mu_true,
+        y_eval,
+    )
+
+    return {
+        "score": -model_metrics["mse"],
+        "mse": model_metrics["mse"],
+        "rmse": model_metrics["rmse"],
+        "noise_norm_mse": model_metrics["noise_norm_mse"],
+        "corr": model_metrics["corr"],
+        "model": model_metrics,
+        "nearest_angle": nearest_metrics,
+        "circular_linear_angle": linear_metrics,
+    }
+
+
+def run_cv_for_params(x_full, y_full, lambdas, p_val, fold_ids):
     fold_results = []
-    for fold_seed in fold_seeds:
-        split = utils.split_data(
-            x_full,
-            y_full,
-            train_trial_prop=TRAIN_TRIAL_PROP,
-            train_condition_prop=TRAIN_CONDITION_PROP,
-            seed=fold_seed,
-        )
-        x_tr, y_tr, _, _, x_test, y_te, *_ = split
-        # y_test = y_te["x"] Have this instead if we want just trail hold out
-        y_test= y_te["x_test"]
+    for fold_id in fold_ids:
+        if EVAL_MODE == "mean_angle_interpolation":
+            x_tr, y_tr, x_test, y_test, train_angles, test_angles = split_angle_parity(
+                x_full, y_full, fold_id
+            )
 
-        x_tr = jnp.asarray(x_tr)
-        y_tr = jnp.asarray(y_tr)
-        y_test = jnp.asarray(y_test)
-        x_test = jnp.asarray(x_test)
+            x_tr = jnp.asarray(x_tr)
+            y_tr = jnp.asarray(y_tr)
+            x_test = jnp.asarray(x_test)
+            y_test = jnp.asarray(y_test)
 
-        period = PERIOD
-        # if period is None:
-        #     period = int(np.unique(np.asarray(x_tr)[:, 0]).size)
+            period = PERIOD
+            beta_gp = estimate_beta_gp(y_tr)
+            hyperparams = make_hyperparams(lambdas, p_val, beta_gp)
+            fit_seed = SEED + 100 + int(fold_id)
 
-        beta_gp = estimate_beta_gp(y_tr)
-        hyperparams = {
-            "gamma_gp_angle": GAMMA,
-            "beta_gp_angle": beta_gp,
-            "lambda_gp_angle": float(lambdas["gp_angle"]),
-            "gamma_gp_sf": GAMMA,
-            "beta_gp_sf": beta_gp,
-            "lambda_gp_sf": float(lambdas["gp_sf"]),
-            "gamma_wp_angle": GAMMA,
-            "beta_wp_angle": BETA_WP,
-            "lambda_wp_angle": float(lambdas["wp_angle"]),
-            "gamma_wp_sf": GAMMA,
-            "beta_wp_sf": BETA_WP,
-            "lambda_wp_sf": float(lambdas["wp_sf"]),
-            "p": int(p_val),
-        }
+            posterior, _ = fit_posterior(x_tr, y_tr, hyperparams, period, fit_seed)
+            metrics = mean_interp_score(posterior, x_tr, y_tr, x_test, y_test, period)
+            score = metrics["score"]
 
-        posterior, lik = fit_posterior(x_tr, y_tr, hyperparams, period, fold_seed)
-        ll_stats = mc_log_prob_trials(
-            posterior,
-            x_test, # change to x_tr if just hold out trials
-            y_test,
-            vi_samples=MC_DRAWS,
-            gp_samples=1,
-            seed=fold_seed + 1000,
-        )
-        score = ll_stats["mean"]
-        fold_results.append(
-            {
-                "seed": int(fold_seed),
-                "beta_gp": float(beta_gp),
-                "period": int(period),
-                "x_train_shape": list(x_tr.shape),
-                "y_train_shape": list(y_tr.shape),
-                "y_test_shape": list(y_test.shape),
-                "score_mean": float(score),
-                "score_std": float(ll_stats["std"]),
-                "score_lp": ll_stats["lp"],
-            }
-        )
+            fold_results.append(
+                {
+                    "fold": int(fold_id),
+                    "train_angles": np.asarray(train_angles).tolist(),
+                    "test_angles": np.asarray(test_angles).tolist(),
+                    "beta_gp": float(beta_gp),
+                    "period": int(period),
+                    "x_train_shape": list(x_tr.shape),
+                    "y_train_shape": list(y_tr.shape),
+                    "y_test_shape": list(y_test.shape),
+                    "score_mean": float(score),
+                    "score_metric": "negative_mean_mse",
+                    "mean_metrics": metrics,
+                }
+            )
+        elif EVAL_MODE == "posterior_predictive_log_prob":
+            split = utils.split_data(
+                x_full,
+                y_full,
+                train_trial_prop=TRAIN_TRIAL_PROP,
+                train_condition_prop=TRAIN_CONDITION_PROP,
+                seed=fold_id,
+            )
+            x_tr, y_tr, _, _, x_test, y_te, *_ = split
+            y_test = y_te["x_test"]
+
+            x_tr = jnp.asarray(x_tr)
+            y_tr = jnp.asarray(y_tr)
+            y_test = jnp.asarray(y_test)
+            x_test = jnp.asarray(x_test)
+
+            period = PERIOD
+            beta_gp = estimate_beta_gp(y_tr)
+            hyperparams = make_hyperparams(lambdas, p_val, beta_gp)
+
+            posterior, _ = fit_posterior(x_tr, y_tr, hyperparams, period, fold_id)
+            ll_stats = mc_log_prob_trials(
+                posterior,
+                x_test,
+                y_test,
+                vi_samples=MC_DRAWS,
+                gp_samples=1,
+                seed=fold_id + 1000,
+            )
+            score = ll_stats["mean"]
+            fold_results.append(
+                {
+                    "seed": int(fold_id),
+                    "beta_gp": float(beta_gp),
+                    "period": int(period),
+                    "x_train_shape": list(x_tr.shape),
+                    "y_train_shape": list(y_tr.shape),
+                    "y_test_shape": list(y_test.shape),
+                    "score_mean": float(score),
+                    "score_std": float(ll_stats["std"]),
+                    "score_lp": ll_stats["lp"],
+                }
+            )
+        else:
+            raise ValueError(f"Unsupported EVAL_MODE: {EVAL_MODE}")
 
     return fold_results
 
@@ -293,7 +452,10 @@ def main():
     if x_full.ndim != 2 or x_full.shape[1] != 2:
         raise ValueError(f"Expected x to have shape (C, 2). Got {x_full.shape}.")
 
-    fold_seeds = [SEED + i for i in range(NUM_FOLDS)]
+    if EVAL_MODE == "mean_angle_interpolation":
+        fold_ids = list(range(NUM_ANGLE_PARITY_FOLDS))
+    else:
+        fold_ids = [SEED + i for i in range(NUM_FOLDS)]
 
     combo_results = []
 
@@ -301,7 +463,7 @@ def main():
         for lambdas in iter_lambda_combos(LAMBDA_GRID):
             p_iter = P_VALUES if FULL_GRID_SEARCH else [P_FOR_LAMBDA_SWEEP]
             for p_val in p_iter:
-                folds = run_cv_for_params(x_full, y_full, lambdas, p_val, fold_seeds)
+                folds = run_cv_for_params(x_full, y_full, lambdas, p_val, fold_ids)
                 summary = summarize_folds(folds)
                 combo_results.append(
                     {
@@ -318,7 +480,7 @@ def main():
         for sample_id in range(N_RANDOM_SAMPLES):
             lambdas = sample_lambdas(rng)
             p_val = int(rng.choice(P_VALUES))
-            folds = run_cv_for_params(x_full, y_full, lambdas, p_val, fold_seeds)
+            folds = run_cv_for_params(x_full, y_full, lambdas, p_val, fold_ids)
             summary = summarize_folds(folds)
             combo_results.append(
                 {
@@ -341,7 +503,7 @@ def main():
 
     p_entries = None
     lambda_for_p = None
-    if SEARCH_STRATEGY == "grid" and not FULL_GRID_SEARCH:
+    if SEARCH_STRATEGY == "grid" and not FULL_GRID_SEARCH and EVAL_MODE == "posterior_predictive_log_prob":
         best_lambda = best_combo["lambdas"] if best_combo else None
         if isinstance(LAMBDA_FOR_P_SWEEP, dict):
             lambda_for_p = LAMBDA_FOR_P_SWEEP
@@ -352,7 +514,7 @@ def main():
 
         p_entries = []
         for p_val in P_VALUES:
-            folds = run_cv_for_params(x_full, y_full, lambda_for_p, p_val, fold_seeds)
+            folds = run_cv_for_params(x_full, y_full, lambda_for_p, p_val, fold_ids)
             summary = summarize_folds(folds)
             p_entries.append(
                 {
@@ -375,19 +537,22 @@ def main():
             "full_grid": bool(FULL_GRID_SEARCH) if SEARCH_STRATEGY == "grid" else None,
             "strategy": SEARCH_STRATEGY,
         },
-        "p_sweep": None if SEARCH_STRATEGY == "random" or FULL_GRID_SEARCH else {
+        "p_sweep": None if p_entries is None else {
             "entries": p_entries,
             "lambda_fixed": lambda_for_p,
         },
         "best_combo": best_combo,
         "best_lambda": None if best_combo is None else best_combo["lambdas"],
         "best_p": None if best_combo is None else best_combo["p"],
-        "fold_seeds": fold_seeds,
+        "fold_ids": fold_ids,
         "config": {
             "data_path": DATA_PATH,
+            "eval_mode": EVAL_MODE,
+            "score_metric": "negative_mean_mse" if EVAL_MODE == "mean_angle_interpolation" else "posterior_predictive_log_prob",
             "train_trial_prop": TRAIN_TRIAL_PROP,
             "train_condition_prop": TRAIN_CONDITION_PROP,
             "num_folds": NUM_FOLDS,
+            "num_angle_parity_folds": NUM_ANGLE_PARITY_FOLDS,
             "iterations": ITERATIONS,
             "adam_step": ADAM_STEP,
             "num_particles": NUM_PARTICLES,
