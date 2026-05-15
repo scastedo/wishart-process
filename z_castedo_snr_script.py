@@ -257,11 +257,11 @@ def analysis(animal, start, stop, small_angle,repeats,total_k,min_neurons,
     BETA_GP = float(jnp.sqrt(v_geo))
 
     hyperparams = {
-        'lambda_gp_angle': 0.05,
+        'lambda_gp_angle': 5.0,
         'gamma_gp_angle':GAMMA,
         'beta_gp_angle': BETA_GP,
 
-        'lambda_gp_sf': 5,
+        'lambda_gp_sf': 5.0,
         'gamma_gp_sf': GAMMA,
         'beta_gp_sf': BETA_GP,
 
@@ -269,7 +269,7 @@ def analysis(animal, start, stop, small_angle,repeats,total_k,min_neurons,
         'gamma_wp_angle': GAMMA,
         'beta_wp_angle': 1.,
 
-        'lambda_wp_sf': 1.5,
+        'lambda_wp_sf': 2.0,
         'gamma_wp_sf': GAMMA,
         'beta_wp_sf': 1.,
         'p': 0
@@ -369,7 +369,7 @@ for i in range(14):
 MIN_NEURONS = min(number_neurons)  #OR None
 TOTAL_K = None
 REPEATS = 100
-SAVE_DIR = "wishart_april"  # create this folder if it doesn't exist
+SAVE_DIR = "wishart_may"  # create this folder if it doesn't exist
 
 for i, animal in enumerate(FOOD_RESTRICTED_SATED):
     analysis(

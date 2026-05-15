@@ -3,11 +3,9 @@
 """
 Cross-validated hyperparameter sweeps for the GP/Wishart model.
 
-The default run now tests angular mean interpolation:
-- train on alternating angle columns across all spatial frequencies
-- hold out the interleaved angle columns
-- sweep GP mean smoothness while keeping the WP covariance smoothness fixed
-- score held-out empirical means, with simple interpolation baselines
+- train with leave-one-angle-out folds across all spatial frequencies
+- sweep GP mean smoothness while keeping GP spatial frequency and WP covariance smoothness fixed
+- score held-out empirical means with closed-form GP interpolation, plus simple baselines
 """
 import os
 
@@ -40,9 +38,11 @@ Y_KEY = "y"
 SEED = 10
 NUM_FOLDS = 5
 NUM_ANGLE_PARITY_FOLDS = 2
+ANGLE_CV_STRATEGY = "leave_one_angle_out"  # "leave_one_angle_out" or "parity"
 TRAIN_TRIAL_PROP = 1.0
 TRAIN_CONDITION_PROP = 0.8
 EVAL_MODE = "mean_angle_interpolation"  # or "posterior_predictive_log_prob"
+MEAN_INTERP_SCORE_SOURCE = "empirical_gp_mean"  # "empirical_gp_mean" or "model"
 
 ADAM_STEP = 0.001
 ITERATIONS = 50000
@@ -56,11 +56,13 @@ OPTIMIZE_L = True
 PERIOD = 12  # set to None to infer from x
 
 LAMBDA_GRID = {
-    "gp_angle": [0.25, 0.5, 1.0, 1.8, 3.0, 5.0, 8.0, 12.0],
-    "gp_sf": [0.5, 1.0, 2.0, 4.0, 8.0, 12.0],
-    "wp_angle": [4.137248645753729],
-    "wp_sf": [4.667857969549391],
+    "gp_angle": [0.05, 0.08, 0.12, 0.18, 0.27, 0.4, 0.6, 0.9,
+                 1.3, 2.0, 3.0, 5.0, 8.0, 12.0, 18.0, 24.0],
+    "gp_sf": [8.0],
+    "wp_angle": [4.0],
+    "wp_sf": [4.0],
 }
+
 
 SEARCH_STRATEGY = "grid"  # "grid" or "random"
 N_RANDOM_SAMPLES = 50
@@ -78,7 +80,7 @@ P_FOR_LAMBDA_SWEEP = 0
 LAMBDA_FOR_P_SWEEP = None  # if dict, use those lambdas; if None, use best combo
 
 OUTPUT_DIR = "outputs"
-RESULTS_PATH = "outputs/mean_interp_angle_cv_april_27_gonz.json"
+RESULTS_PATH = "outputs/mean_interp_angle_empirical_gp_cv_may_15.json"
 
 def estimate_beta_gp(y_train):
     mu = y_train.mean(axis=0)
@@ -231,6 +233,42 @@ def split_angle_parity(x_full, y_full, fold_id):
     )
 
 
+def split_leave_one_angle_out(x_full, y_full, fold_id):
+    x_np = np.asarray(x_full)
+    unique_angles = np.sort(np.unique(x_np[:, 0]))
+    test_angle = unique_angles[int(fold_id)]
+    train_angles = unique_angles[~np.isclose(unique_angles, test_angle)]
+
+    test_mask = np.isclose(x_np[:, 0], test_angle)
+    train_mask = ~test_mask
+
+    return (
+        x_full[train_mask],
+        y_full[:, train_mask, :],
+        x_full[test_mask],
+        y_full[:, test_mask, :],
+        train_angles,
+        np.asarray([test_angle]),
+    )
+
+
+def split_mean_angle_interpolation(x_full, y_full, fold_id):
+    if ANGLE_CV_STRATEGY == "leave_one_angle_out":
+        return split_leave_one_angle_out(x_full, y_full, fold_id)
+    if ANGLE_CV_STRATEGY == "parity":
+        return split_angle_parity(x_full, y_full, fold_id)
+    raise ValueError(f"Unsupported ANGLE_CV_STRATEGY: {ANGLE_CV_STRATEGY}")
+
+
+def mean_angle_fold_ids(x_full):
+    if ANGLE_CV_STRATEGY == "leave_one_angle_out":
+        unique_angles = np.sort(np.unique(np.asarray(x_full)[:, 0]))
+        return list(range(len(unique_angles)))
+    if ANGLE_CV_STRATEGY == "parity":
+        return list(range(NUM_ANGLE_PARITY_FOLDS))
+    raise ValueError(f"Unsupported ANGLE_CV_STRATEGY: {ANGLE_CV_STRATEGY}")
+
+
 def align_mean_shape(mu_hat, mu_true):
     mu_hat = jnp.asarray(mu_hat)
     if mu_hat.shape == mu_true.shape:
@@ -260,6 +298,24 @@ def nearest_angle_baseline(x_train, y_train, x_eval, period):
         distances = circular_angle_distance(x_train_np[candidates, 0], x_row[0], period)
         nearest = candidates[np.isclose(distances, distances.min())]
         preds.append(mu_train[nearest].mean(axis=0))
+
+    return jnp.asarray(np.stack(preds, axis=0))
+
+
+def nearest_single_angle_baseline(x_train, y_train, x_eval, period):
+    x_train_np = np.asarray(x_train)
+    x_eval_np = np.asarray(x_eval)
+    mu_train = np.asarray(y_train).mean(axis=0)
+
+    preds = []
+    for x_row in x_eval_np:
+        same_sf = np.isclose(x_train_np[:, 1], x_row[1])
+        candidates = np.where(same_sf)[0]
+        if candidates.size == 0:
+            candidates = np.arange(x_train_np.shape[0])
+
+        distances = circular_angle_distance(x_train_np[candidates, 0], x_row[0], period)
+        preds.append(mu_train[candidates[np.argmin(distances)]])
 
     return jnp.asarray(np.stack(preds, axis=0))
 
@@ -295,6 +351,13 @@ def circular_linear_angle_baseline(x_train, y_train, x_eval, period):
     return jnp.asarray(np.stack(preds, axis=0))
 
 
+def empirical_gp_mean_baseline(x_train, y_train, x_eval, hyperparams, period):
+    kernel_gp, _ = build_kernels(hyperparams, period)
+    gp = models.GaussianProcess(kernel=kernel_gp, N=y_train.shape[-1])
+    mu_train = jnp.asarray(y_train).mean(axis=0)
+    return gp.posterior_mode(jnp.asarray(x_train), mu_train, jnp.asarray(x_eval))
+
+
 def prediction_metrics(mu_hat, mu_true, y_eval):
     mu_hat = align_mean_shape(mu_hat, mu_true)
     err = mu_hat - mu_true
@@ -316,18 +379,31 @@ def prediction_metrics(mu_hat, mu_true, y_eval):
     }
 
 
-def mean_interp_score(posterior, x_train, y_train, x_eval, y_eval, period):
+def mean_interp_score(posterior, x_train, y_train, x_eval, y_eval, hyperparams, period):
     mu_true = jnp.asarray(y_eval).mean(axis=0)
     mu_hat, _, _ = posterior.mode(jnp.asarray(x_eval))
+    mu_train_true = jnp.asarray(y_train).mean(axis=0)
+    mu_train_hat, _, _ = posterior.mode(jnp.asarray(x_train))
 
     model_metrics = prediction_metrics(mu_hat, mu_true, y_eval)
+    train_model_metrics = prediction_metrics(mu_train_hat, mu_train_true, y_train)
     nearest_metrics = prediction_metrics(
         nearest_angle_baseline(x_train, y_train, x_eval, period),
         mu_true,
         y_eval,
     )
+    nearest_single_metrics = prediction_metrics(
+        nearest_single_angle_baseline(x_train, y_train, x_eval, period),
+        mu_true,
+        y_eval,
+    )
     linear_metrics = prediction_metrics(
         circular_linear_angle_baseline(x_train, y_train, x_eval, period),
+        mu_true,
+        y_eval,
+    )
+    empirical_gp_metrics = prediction_metrics(
+        empirical_gp_mean_baseline(x_train, y_train, x_eval, hyperparams, period),
         mu_true,
         y_eval,
     )
@@ -339,8 +415,51 @@ def mean_interp_score(posterior, x_train, y_train, x_eval, y_eval, period):
         "noise_norm_mse": model_metrics["noise_norm_mse"],
         "corr": model_metrics["corr"],
         "model": model_metrics,
+        "train_model": train_model_metrics,
+        "model_minus_circular_linear_mse": model_metrics["mse"] - linear_metrics["mse"],
+        "empirical_gp_minus_circular_linear_mse": empirical_gp_metrics["mse"] - linear_metrics["mse"],
         "nearest_angle": nearest_metrics,
+        "nearest_single_angle": nearest_single_metrics,
         "circular_linear_angle": linear_metrics,
+        "empirical_gp_mean": empirical_gp_metrics,
+    }
+
+
+def empirical_gp_mean_interp_score(x_train, y_train, x_eval, y_eval, hyperparams, period):
+    mu_true = jnp.asarray(y_eval).mean(axis=0)
+    empirical_gp_metrics = prediction_metrics(
+        empirical_gp_mean_baseline(x_train, y_train, x_eval, hyperparams, period),
+        mu_true,
+        y_eval,
+    )
+    nearest_metrics = prediction_metrics(
+        nearest_angle_baseline(x_train, y_train, x_eval, period),
+        mu_true,
+        y_eval,
+    )
+    nearest_single_metrics = prediction_metrics(
+        nearest_single_angle_baseline(x_train, y_train, x_eval, period),
+        mu_true,
+        y_eval,
+    )
+    linear_metrics = prediction_metrics(
+        circular_linear_angle_baseline(x_train, y_train, x_eval, period),
+        mu_true,
+        y_eval,
+    )
+
+    return {
+        "score": -empirical_gp_metrics["mse"],
+        "mse": empirical_gp_metrics["mse"],
+        "rmse": empirical_gp_metrics["rmse"],
+        "noise_norm_mse": empirical_gp_metrics["noise_norm_mse"],
+        "corr": empirical_gp_metrics["corr"],
+        "score_source": "empirical_gp_mean",
+        "empirical_gp_minus_circular_linear_mse": empirical_gp_metrics["mse"] - linear_metrics["mse"],
+        "nearest_angle": nearest_metrics,
+        "nearest_single_angle": nearest_single_metrics,
+        "circular_linear_angle": linear_metrics,
+        "empirical_gp_mean": empirical_gp_metrics,
     }
 
 
@@ -348,7 +467,7 @@ def run_cv_for_params(x_full, y_full, lambdas, p_val, fold_ids):
     fold_results = []
     for fold_id in fold_ids:
         if EVAL_MODE == "mean_angle_interpolation":
-            x_tr, y_tr, x_test, y_test, train_angles, test_angles = split_angle_parity(
+            x_tr, y_tr, x_test, y_test, train_angles, test_angles = split_mean_angle_interpolation(
                 x_full, y_full, fold_id
             )
 
@@ -360,11 +479,25 @@ def run_cv_for_params(x_full, y_full, lambdas, p_val, fold_ids):
             period = PERIOD
             beta_gp = estimate_beta_gp(y_tr)
             hyperparams = make_hyperparams(lambdas, p_val, beta_gp)
-            fit_seed = SEED + 100 + int(fold_id)
 
-            posterior, _ = fit_posterior(x_tr, y_tr, hyperparams, period, fit_seed)
-            metrics = mean_interp_score(posterior, x_tr, y_tr, x_test, y_test, period)
+            if MEAN_INTERP_SCORE_SOURCE == "empirical_gp_mean":
+                metrics = empirical_gp_mean_interp_score(
+                    x_tr,
+                    y_tr,
+                    x_test,
+                    y_test,
+                    hyperparams,
+                    period,
+                )
+            elif MEAN_INTERP_SCORE_SOURCE == "model":
+                fit_seed = SEED + 100 + int(fold_id)
+                posterior, _ = fit_posterior(x_tr, y_tr, hyperparams, period, fit_seed)
+                metrics = mean_interp_score(posterior, x_tr, y_tr, x_test, y_test, hyperparams, period)
+                metrics["score_source"] = "model"
+            else:
+                raise ValueError(f"Unsupported MEAN_INTERP_SCORE_SOURCE: {MEAN_INTERP_SCORE_SOURCE}")
             score = metrics["score"]
+            score_metric = f"negative_{metrics['score_source']}_mse"
 
             fold_results.append(
                 {
@@ -377,7 +510,7 @@ def run_cv_for_params(x_full, y_full, lambdas, p_val, fold_ids):
                     "y_train_shape": list(y_tr.shape),
                     "y_test_shape": list(y_test.shape),
                     "score_mean": float(score),
-                    "score_metric": "negative_mean_mse",
+                    "score_metric": score_metric,
                     "mean_metrics": metrics,
                 }
             )
@@ -453,7 +586,7 @@ def main():
         raise ValueError(f"Expected x to have shape (C, 2). Got {x_full.shape}.")
 
     if EVAL_MODE == "mean_angle_interpolation":
-        fold_ids = list(range(NUM_ANGLE_PARITY_FOLDS))
+        fold_ids = mean_angle_fold_ids(x_full)
     else:
         fold_ids = [SEED + i for i in range(NUM_FOLDS)]
 
@@ -548,11 +681,14 @@ def main():
         "config": {
             "data_path": DATA_PATH,
             "eval_mode": EVAL_MODE,
-            "score_metric": "negative_mean_mse" if EVAL_MODE == "mean_angle_interpolation" else "posterior_predictive_log_prob",
+            "score_metric": f"negative_{MEAN_INTERP_SCORE_SOURCE}_mse" if EVAL_MODE == "mean_angle_interpolation" else "posterior_predictive_log_prob",
+            "mean_interp_score_source": MEAN_INTERP_SCORE_SOURCE,
             "train_trial_prop": TRAIN_TRIAL_PROP,
             "train_condition_prop": TRAIN_CONDITION_PROP,
             "num_folds": NUM_FOLDS,
             "num_angle_parity_folds": NUM_ANGLE_PARITY_FOLDS,
+            "angle_cv_strategy": ANGLE_CV_STRATEGY,
+            "num_angle_folds": len(fold_ids) if EVAL_MODE == "mean_angle_interpolation" else None,
             "iterations": ITERATIONS,
             "adam_step": ADAM_STEP,
             "num_particles": NUM_PARTICLES,
