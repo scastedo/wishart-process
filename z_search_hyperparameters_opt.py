@@ -3,9 +3,8 @@
 """
 Cross-validated hyperparameter sweeps for the GP/Wishart model.
 
-- train with leave-one-angle-out folds across all spatial frequencies
-- sweep GP mean smoothness while keeping GP spatial frequency and WP covariance smoothness fixed
-- score held-out empirical means with closed-form GP interpolation, plus simple baselines
+- mean-angle mode: leave one angle out and score GP interpolation of empirical means
+- WP mode: keep all conditions, leave one trial out, and score posterior predictive log prob
 """
 import os
 
@@ -39,15 +38,16 @@ SEED = 10
 NUM_FOLDS = 5
 NUM_ANGLE_PARITY_FOLDS = 2
 ANGLE_CV_STRATEGY = "leave_one_angle_out"  # "leave_one_angle_out" or "parity"
+TRIAL_HOLDOUT_FOLDS = None  # None means leave each trial out once
 TRAIN_TRIAL_PROP = 1.0
 TRAIN_CONDITION_PROP = 0.8
-EVAL_MODE = "mean_angle_interpolation"  # or "posterior_predictive_log_prob"
+EVAL_MODE = "trial_holdout_log_prob"  # "mean_angle_interpolation", "trial_holdout_log_prob", or "posterior_predictive_log_prob"
 MEAN_INTERP_SCORE_SOURCE = "empirical_gp_mean"  # "empirical_gp_mean" or "model"
 
 ADAM_STEP = 0.001
-ITERATIONS = 50000
+ITERATIONS = 30000
 NUM_PARTICLES = 1
-MC_DRAWS = 50
+MC_DRAWS = 20
 
 GAMMA = 1e-5
 BETA_WP = 1.0
@@ -56,11 +56,10 @@ OPTIMIZE_L = True
 PERIOD = 12  # set to None to infer from x
 
 LAMBDA_GRID = {
-    "gp_angle": [0.05, 0.08, 0.12, 0.18, 0.27, 0.4, 0.6, 0.9,
-                 1.3, 2.0, 3.0, 5.0, 8.0, 12.0, 18.0, 24.0],
-    "gp_sf": [8.0],
-    "wp_angle": [4.0],
-    "wp_sf": [4.0],
+    "gp_angle": [17.0],
+    "gp_sf": [24.0],
+    "wp_angle": [0.5, 2.0, 8.0, 16.0],
+    "wp_sf": [0.5, 2.0, 8.0, 16.0],
 }
 
 
@@ -74,13 +73,13 @@ LAMBDA_RANGES = {
 }
 LAMBDA_SAMPLE = "uniform"  # or "uniform"
 
-P_VALUES = [0]
-FULL_GRID_SEARCH = False  # if True, grid search over lambdas x P
+P_VALUES = [0, 2, 4]
+FULL_GRID_SEARCH = True  # if True, grid search over lambdas x P
 P_FOR_LAMBDA_SWEEP = 0
 LAMBDA_FOR_P_SWEEP = None  # if dict, use those lambdas; if None, use best combo
 
 OUTPUT_DIR = "outputs"
-RESULTS_PATH = "outputs/mean_interp_angle_empirical_gp_cv_may_15.json"
+RESULTS_PATH = "outputs/wp_trial_loo_cv_gp17_24_pilot_may15.json"
 
 def estimate_beta_gp(y_train):
     mu = y_train.mean(axis=0)
@@ -267,6 +266,23 @@ def mean_angle_fold_ids(x_full):
     if ANGLE_CV_STRATEGY == "parity":
         return list(range(NUM_ANGLE_PARITY_FOLDS))
     raise ValueError(f"Unsupported ANGLE_CV_STRATEGY: {ANGLE_CV_STRATEGY}")
+
+
+def split_leave_one_trial_out(x_full, y_full, fold_id):
+    n_trials = y_full.shape[0]
+    test_trial = int(fold_id) % n_trials
+
+    train_mask = np.ones(n_trials, dtype=bool)
+    train_mask[test_trial] = False
+
+    return (
+        x_full,
+        y_full[train_mask, :, :],
+        x_full,
+        y_full[[test_trial], :, :],
+        np.where(train_mask)[0],
+        np.asarray([test_trial]),
+    )
 
 
 def align_mean_shape(mu_hat, mu_true):
@@ -557,6 +573,49 @@ def run_cv_for_params(x_full, y_full, lambdas, p_val, fold_ids):
                     "score_lp": ll_stats["lp"],
                 }
             )
+        elif EVAL_MODE == "trial_holdout_log_prob":
+            x_tr, y_tr, x_test, y_test, train_trials, test_trials = split_leave_one_trial_out(
+                x_full,
+                y_full,
+                fold_id,
+            )
+
+            x_tr = jnp.asarray(x_tr)
+            y_tr = jnp.asarray(y_tr)
+            x_test = jnp.asarray(x_test)
+            y_test = jnp.asarray(y_test)
+
+            period = PERIOD
+            beta_gp = estimate_beta_gp(y_tr)
+            hyperparams = make_hyperparams(lambdas, p_val, beta_gp)
+
+            posterior, _ = fit_posterior(x_tr, y_tr, hyperparams, period, fold_id)
+            ll_stats = mc_log_prob_trials(
+                posterior,
+                x_test,
+                y_test,
+                vi_samples=MC_DRAWS,
+                gp_samples=1,
+                seed=fold_id + 1000,
+            )
+            score = ll_stats["mean"]
+            fold_results.append(
+                {
+                    "fold": int(fold_id),
+                    "train_trials": np.asarray(train_trials).tolist(),
+                    "test_trials": np.asarray(test_trials).tolist(),
+                    "beta_gp": float(beta_gp),
+                    "period": int(period),
+                    "x_train_shape": list(x_tr.shape),
+                    "y_train_shape": list(y_tr.shape),
+                    "x_test_shape": list(x_test.shape),
+                    "y_test_shape": list(y_test.shape),
+                    "score_mean": float(score),
+                    "score_std": float(ll_stats["std"]),
+                    "score_metric": "trial_holdout_log_prob",
+                    "score_lp": ll_stats["lp"],
+                }
+            )
         else:
             raise ValueError(f"Unsupported EVAL_MODE: {EVAL_MODE}")
 
@@ -587,6 +646,9 @@ def main():
 
     if EVAL_MODE == "mean_angle_interpolation":
         fold_ids = mean_angle_fold_ids(x_full)
+    elif EVAL_MODE == "trial_holdout_log_prob":
+        n_trial_folds = y_full.shape[0] if TRIAL_HOLDOUT_FOLDS is None else min(int(TRIAL_HOLDOUT_FOLDS), y_full.shape[0])
+        fold_ids = list(range(n_trial_folds))
     else:
         fold_ids = [SEED + i for i in range(NUM_FOLDS)]
 
@@ -633,6 +695,13 @@ def main():
     if combo_results:
         best_idx = int(np.nanargmax(np.asarray([item["mean"] for item in combo_results])))
         best_combo = combo_results[best_idx]
+
+    if EVAL_MODE == "mean_angle_interpolation":
+        score_metric = f"negative_{MEAN_INTERP_SCORE_SOURCE}_mse"
+    elif EVAL_MODE == "trial_holdout_log_prob":
+        score_metric = "trial_holdout_log_prob"
+    else:
+        score_metric = "posterior_predictive_log_prob"
 
     p_entries = None
     lambda_for_p = None
@@ -681,7 +750,7 @@ def main():
         "config": {
             "data_path": DATA_PATH,
             "eval_mode": EVAL_MODE,
-            "score_metric": f"negative_{MEAN_INTERP_SCORE_SOURCE}_mse" if EVAL_MODE == "mean_angle_interpolation" else "posterior_predictive_log_prob",
+            "score_metric": score_metric,
             "mean_interp_score_source": MEAN_INTERP_SCORE_SOURCE,
             "train_trial_prop": TRAIN_TRIAL_PROP,
             "train_condition_prop": TRAIN_CONDITION_PROP,
@@ -689,6 +758,8 @@ def main():
             "num_angle_parity_folds": NUM_ANGLE_PARITY_FOLDS,
             "angle_cv_strategy": ANGLE_CV_STRATEGY,
             "num_angle_folds": len(fold_ids) if EVAL_MODE == "mean_angle_interpolation" else None,
+            "trial_holdout_folds": TRIAL_HOLDOUT_FOLDS,
+            "num_trial_holdout_folds": len(fold_ids) if EVAL_MODE == "trial_holdout_log_prob" else None,
             "iterations": ITERATIONS,
             "adam_step": ADAM_STEP,
             "num_particles": NUM_PARTICLES,
