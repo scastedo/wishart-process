@@ -142,3 +142,5 @@ cython_debug/
 *.mp4
 *.png
 *.jpgz_old/old_files/sampled_dim_noise.npy
+wishart_*
+outputs/

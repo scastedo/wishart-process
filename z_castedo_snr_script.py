@@ -141,12 +141,15 @@ def compute_noise_metrics_all(
     covariance_fits = np.asarray(covariance_fits)
     mu_test_hat = np.asarray(mu_test_hat)
 
-    if total_k is None:
+    conditions, neurons = y_response.shape
+
+    if total_k == "all":
+        kmax = neurons
+    elif total_k is None:
         kmax = min_neurons
     else:
         kmax = total_k
 
-    conditions, neurons = y_response.shape
     c1 = 12
     c2 = 5
     assert conditions == c1 * c2, f"Expected conditions to be {c1*c2}, got {conditions}"
@@ -246,7 +249,7 @@ def analysis(animal, start, stop, small_angle,repeats,total_k,min_neurons,
     GAMMA = 1e-5# GAMMA set small for stability
     ADAM_OPT = 0.001
     wp_sample_diag = GAMMA  # For numerical stability
-    ITERATIONS = 50000
+    ITERATIONS = 80000
     NUM_PART = 1
 
 
@@ -257,15 +260,15 @@ def analysis(animal, start, stop, small_angle,repeats,total_k,min_neurons,
     BETA_GP = float(jnp.sqrt(v_geo))
 
     hyperparams = {
-        'lambda_gp_angle': 5.0,
+        'lambda_gp_angle': 17.0,
         'gamma_gp_angle':GAMMA,
         'beta_gp_angle': BETA_GP,
 
-        'lambda_gp_sf': 5.0,
+        'lambda_gp_sf': 24.0,
         'gamma_gp_sf': GAMMA,
         'beta_gp_sf': BETA_GP,
 
-        'lambda_wp_angle': 0.5,
+        'lambda_wp_angle': 17.0,
         'gamma_wp_angle': GAMMA,
         'beta_wp_angle': 1.,
 
@@ -367,9 +370,13 @@ for i in range(14):
     number_neurons.append(x.shape[0])
 
 MIN_NEURONS = min(number_neurons)  #OR None
-TOTAL_K = None
-REPEATS = 100
-SAVE_DIR = "wishart_may"  # create this folder if it doesn't exist
+
+USE_ALL_NEURONS = True
+TOTAL_K = "all" if USE_ALL_NEURONS else None
+REPEATS = 1 if USE_ALL_NEURONS else 100
+
+
+SAVE_DIR = "wishart_may19_dynamic"  # create this folder if it doesn't exist
 
 for i, animal in enumerate(FOOD_RESTRICTED_SATED):
     analysis(

@@ -58,8 +58,8 @@ PERIOD = 12  # set to None to infer from x
 LAMBDA_GRID = {
     "gp_angle": [17.0],
     "gp_sf": [24.0],
-    "wp_angle": [0.5, 2.0, 8.0, 16.0],
-    "wp_sf": [0.5, 2.0, 8.0, 16.0],
+    "wp_angle": [18.0, 20.0, 24.0, 30.0],
+    "wp_sf": [2.0],
 }
 
 
@@ -73,13 +73,13 @@ LAMBDA_RANGES = {
 }
 LAMBDA_SAMPLE = "uniform"  # or "uniform"
 
-P_VALUES = [0, 2, 4]
+P_VALUES = [0]
 FULL_GRID_SEARCH = True  # if True, grid search over lambdas x P
 P_FOR_LAMBDA_SWEEP = 0
 LAMBDA_FOR_P_SWEEP = None  # if dict, use those lambdas; if None, use best combo
 
 OUTPUT_DIR = "outputs"
-RESULTS_PATH = "outputs/wp_trial_loo_cv_gp17_24_pilot_may15.json"
+RESULTS_PATH = "outputs/wp_trial_loo_cv_gp17_24_full_wpangle_next.json"
 
 def estimate_beta_gp(y_train):
     mu = y_train.mean(axis=0)
